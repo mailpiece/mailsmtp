@@ -1,0 +1,22 @@
+# Angle brackets inside, around, and instead of a path. The address boundary
+# has to come out of exactly one pair of them.
+EHLO fuzz.example
+MAIL FROM:<a<b@example.com>
+RSET
+MAIL FROM:<a>b@example.com>
+RSET
+MAIL FROM:<<user@example.com>>
+RSET
+MAIL FROM:<>>
+RSET
+MAIL FROM:><
+RSET
+MAIL FROM:<user@example.com> <other@example.com>
+RSET
+MAIL FROM:<user@example.com>>
+RSET
+MAIL FROM:<user@example.com>
+RCPT TO:<a<b@example.com>
+RCPT TO:<<user@example.com>>
+RCPT TO:<user@example.com> <other@example.com>
+QUIT

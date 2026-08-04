@@ -1,0 +1,19 @@
+# RFC 5321 §3.6.1 source routes. Stripping "<@relay1.example:>" down to ""
+# forged the null sender: 250, and a bounce sender the client never sent.
+# Only a literal <> is the null sender; every other line here must be refused.
+EHLO fuzz.example
+MAIL FROM:<@relay1.example:>
+MAIL FROM:<@a,@b:>
+MAIL FROM:<@a,@b:user@example.com>
+MAIL FROM:<@relay1.example:user@example.com>
+MAIL FROM:< >
+MAIL FROM:<\t>
+MAIL FROM:<@:>
+MAIL FROM:<:>
+MAIL FROM:<:user@example.com>
+MAIL FROM:<>
+RCPT TO:<@relay1.example:>
+RCPT TO:<>
+RCPT TO:< >
+RCPT TO:<@a:user@example.com>
+QUIT

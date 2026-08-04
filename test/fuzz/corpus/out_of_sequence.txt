@@ -1,0 +1,22 @@
+# Every command in the wrong place: before HELO, mid-transaction, and after a
+# reset. None of it may leave envelope state behind.
+DATA
+RCPT TO:<user@example.com>
+MAIL FROM:<user@example.com>
+STARTTLS
+RSET
+EHLO fuzz.example
+DATA
+RCPT TO:<user@example.com>
+MAIL FROM:<user@example.com>
+MAIL FROM:<second@example.com>
+DATA
+RCPT TO:<user@example.com>
+EHLO fuzz.example
+DATA
+VRFY user
+EXPN list
+HELP
+PROXY TCP4 1.2.3.4 5.6.7.8 1 2
+WHATISTHIS
+QUIT

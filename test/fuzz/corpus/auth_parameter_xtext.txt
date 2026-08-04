@@ -1,0 +1,30 @@
+# AUTH= (RFC 4954 §5) is xtext: printable US-ASCII with "+XX" hex escapes.
+# Malformed escapes must not decode, and a decoded control character must not
+# reach the identity an application logs.
+EHLO fuzz.example
+AUTH PLAIN AHVzZXIAc2VjcmV0
+MAIL FROM:<user@example.com> AUTH=user@example.com
+RSET
+MAIL FROM:<user@example.com> AUTH=user+FF@example.com
+RSET
+MAIL FROM:<user@example.com> AUTH=+00x
+RSET
+MAIL FROM:<user@example.com> AUTH=<>
+RSET
+MAIL FROM:<user@example.com> AUTH=+ZZ
+RSET
+MAIL FROM:<user@example.com> AUTH=+
+RSET
+MAIL FROM:<user@example.com> AUTH=+A
+RSET
+MAIL FROM:<user@example.com> AUTH=
+RSET
+MAIL FROM:<user@example.com> AUTH=user+2B+0Aadmin@example.com
+RSET
+MAIL FROM:<user@example.com> AUTH=user+0D+0Aadmin@example.com
+RSET
+MAIL FROM:<user@example.com> AUTH=a+7Fb
+RSET
+MAIL FROM:<user@example.com> AUTH=+2b+2B
+RSET
+QUIT

@@ -1,0 +1,18 @@
+# DATA framing: dot-stuffing, a bare LF and a bare CR in the body (the SMTP
+# smuggling shapes, CVE-2023-51764 class), and a bare-LF dot that must not be
+# taken for the terminator.
+EHLO fuzz.example
+MAIL FROM:<user@example.com>
+RCPT TO:<user@example.com>
+DATA
+Subject: framing
+
+..stuffed
+.unstuffed
+bare lf follows\n
+bare cr follows\r
+.\n
+still body
+\0nul in body
+.
+QUIT

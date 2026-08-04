@@ -1,0 +1,41 @@
+# Publish to RubyGems using the official release-gem action (Trusted Publishing).
+# Run this workflow manually after bumping version and pushing to main. Tests run first.
+name: Release
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    name: Test and push gem to RubyGems.org
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for RubyGems Trusted Publishing
+      contents: write   # required for rake release to push the release tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+      - name: Run tests
+        run: bundle exec rake
+      - name: Publish to RubyGems.org
+        uses: rubygems/release-gem@v1
+      - name: Set release tag and notes
+        id: tag
+        run: |
+          VERSION=$(ruby -e "require './lib/mailsmtp/version'; puts MailSmtp::VERSION")
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          awk -v ver="$VERSION" '
+            $0 == "## " ver { keep = 1 }
+            keep && /^## / && $0 != "## " ver { keep = 0 }
+            keep { print }
+          ' CHANGELOG.md > release-notes.md
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: pkg/mailsmtp-*.gem
+          body_path: release-notes.md
+          generate_release_notes: false

@@ -1,0 +1,17 @@
+# AUTH value states: the continuation lines are the secret itself, so a
+# command sent where a credential belongs must be read as a credential and
+# never run.
+EHLO fuzz.example
+AUTH PLAIN
+MAIL FROM:<user@example.com>
+AUTH LOGIN
+dXNlcg==
+c2VjcmV0
+AUTH PLAIN AHVzZXIAc2VjcmV0
+AUTH PLAIN AHVzZXIAc2VjcmV0
+AUTH SOMETHINGELSE
+AUTH PLAIN dmljdGltAHVzZXIAc2VjcmV0
+AUTH PLAIN ****
+MAIL FROM:<user@example.com>
+RCPT TO:<user@example.com>
+QUIT

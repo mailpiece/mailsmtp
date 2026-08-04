@@ -1,0 +1,19 @@
+# A quoted local part is legal RFC 5321 and refused here on purpose. The
+# second line is the one that mattered: parameters scanned across the whole
+# command tail read " SIZE=1 " out of the middle of the mailbox, declaring a
+# one-octet message and handing the application a rewritten address.
+EHLO fuzz.example
+MAIL FROM:<"a>b"@example.com>
+RSET
+MAIL FROM:<"pay SIZE=1 me"@example.com>
+RSET
+MAIL FROM:<"a b"@example.com>
+RSET
+MAIL FROM:<"a b"@example.com> SIZE=1
+RSET
+MAIL FROM:<"@evil.example:"@example.com>
+RSET
+MAIL FROM:<user@example.com>
+RCPT TO:<"a>b"@example.com>
+RCPT TO:<"pay SIZE=1 me"@example.com>
+QUIT

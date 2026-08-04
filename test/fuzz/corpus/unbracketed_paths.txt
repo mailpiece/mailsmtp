@@ -1,0 +1,38 @@
+# Paths without brackets, or with only one of them. Refused under strict_path
+# (the default); read up to the first space under strict_path: false, where
+# what follows the address is the parameter list. Neither mode may guess a
+# mailbox out of a half-bracketed path, and neither may reach the null sender
+# without a literal <>.
+EHLO fuzz.example
+MAIL FROM:user@example.com
+RSET
+MAIL FROM: user@example.com
+RSET
+MAIL FROM:user@example.com SIZE=100
+RSET
+MAIL FROM:user@example.com junk
+RSET
+MAIL FROM:a=b@example.com
+RSET
+MAIL FROM:@relay.example:user@example.com
+RSET
+MAIL FROM:@relay.example:
+RSET
+MAIL FROM:<user@example.com
+RSET
+MAIL FROM:user@example.com>
+RSET
+MAIL FROM:
+RSET
+MAIL FROM:\x20
+RSET
+MAIL FROM:\t
+RSET
+MAIL FROM:<user@example.com>
+RCPT TO:user@example.com
+RCPT TO:
+RCPT TO:Postmaster
+RCPT TO:<Postmaster>
+MAIL FROM:<user@example.com>
+RCPT TO:<user@example.com>
+QUIT

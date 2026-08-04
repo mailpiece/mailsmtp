@@ -1,0 +1,22 @@
+# NUL, CR and high bytes inside commands and paths. A command line loses
+# every CR and LF before it is parsed, so none of these may ride into an
+# envelope address or a generated header.
+EHLO fuzz\0.example
+EHLO fuzz\r.example
+EHLO fuzz\xff.example
+EHLO fuzz(.example
+MAIL FROM:<user@example.com\0>
+RSET
+MAIL FROM:<user\0@example.com>
+RSET
+MAIL FROM:<user@example.com\r>
+RSET
+MAIL FROM:<user@ex\xc3\xa4mple.com>
+RSET
+MAIL FROM:<user@ex\xffample.com>
+RSET
+MAIL FROM:<user@example.com>
+RCPT TO:<user@example.com\0>
+RCPT TO:<user@ex\xffample.com>
+RCPT TO:<user@example.com>\r
+QUIT
