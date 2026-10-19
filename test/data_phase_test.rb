@@ -374,7 +374,55 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     refute_includes server.received[:data], "\r\n.\r\n"
   end
 
+  # A line every 0.1s never lets read_timeout fire, but at the default 500 bytes/s
+  # the drip falls behind as soon as read_timeout's grace runs out.
+  def test_a_client_dripping_the_body_below_the_minimum_data_rate_is_dropped
+    server = start_server(read_timeout: 0.3)
+
+    socket = data_phase_socket(port)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    response = drip_body_lines(socket, seconds: 2)
+
+    assert_match(/\A421 /, response.to_s)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1
+    wait_until_idle(server)
+    assert_equal 0, server.processings_count
+  end
+
+  def test_a_large_body_sent_quickly_keeps_up_with_the_minimum_data_rate
+    server = ReceivingServer.new(**server_options(read_timeout: 0.3))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: big\r\n\r\n#{"#{"a" * 998}\r\n" * 200}.\r\n")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_operator server.received[:data].bytesize, :>, 200_000
+  end
+
+  def test_a_nil_min_data_rate_leaves_a_dripping_client_to_the_idle_timeout
+    start_server(read_timeout: 0.3, min_data_rate: nil)
+
+    socket = data_phase_socket(port)
+
+    assert_nil drip_body_lines(socket, seconds: 1)
+    socket.print(".\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+  end
+
   private
+    # Writes one short body line every 0.1s until the server replies or +seconds+
+    # pass, returning the reply or nil.
+    def drip_body_lines(socket, seconds:)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+      socket.print("Subject: drip\r\n\r\n")
+      while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+        return read_smtp_response(socket) if socket.wait_readable(0.1)
+        socket.print("x\r\n")
+      end
+      nil
+    end
+
     # Walks a raw socket to the 354 prompt. Net::SMTP always writes well-formed CRLF,
     # so anything asserting on the DATA framing has to write the body itself.
     def data_phase_socket(port)

@@ -31,6 +31,9 @@ module MailSmtp
     # RFC 5321 §4.5.3.2.7: servers should wait at least 5 minutes for the next
     # client command. (The earlier §4.5.3.2.1–.6 times are client-side.)
     READ_TIMEOUT = 300
+    # Postfix's smtpd_min_data_rate (bytes per second): past +read_timeout+, DATA
+    # must keep up this rate, so a line every few seconds cannot hold a slot.
+    MIN_DATA_RATE = 500
     WRITE_TIMEOUT = 30
     HANDSHAKE_TIMEOUT = 30
     MAX_PROCESSINGS_WAIT = 30
@@ -134,6 +137,7 @@ module MailSmtp
       max_message_size: MAX_MESSAGE_SIZE, max_recipients: MAX_RECIPIENTS,
       max_processings_wait: MAX_PROCESSINGS_WAIT,
       read_timeout: READ_TIMEOUT, write_timeout: WRITE_TIMEOUT,
+      min_data_rate: MIN_DATA_RATE,
       handshake_timeout: HANDSHAKE_TIMEOUT,
       max_session_duration: MAX_SESSION_DURATION,
       max_auth_failures: MAX_AUTH_FAILURES,
@@ -143,8 +147,8 @@ module MailSmtp
       validate_options(tls: tls, auth: auth, starttls: starttls, max_connections: max_connections,
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
         max_recipients: max_recipients, max_auth_failures: max_auth_failures,
-        max_exceptions: max_exceptions, eight_bit_mime: eight_bit_mime, smtputf8: smtputf8,
-        logger: logger, logger_severity: logger_severity)
+        max_exceptions: max_exceptions, min_data_rate: min_data_rate,
+        eight_bit_mime: eight_bit_mime, smtputf8: smtputf8, logger: logger, logger_severity: logger_severity)
 
       @listeners = Array(listeners)
       @addresses = listen_addresses_in(hosts || host, ports || port)
@@ -166,6 +170,7 @@ module MailSmtp
       @max_recipients = max_recipients
       @read_timeout = read_timeout
       @write_timeout = write_timeout
+      @min_data_rate = min_data_rate
       # Always finite, and independent of +read_timeout+ (which may be nil). +Timeout+
       # cannot interrupt OpenSSL's blocking accept, so +IO#timeout+ is set around it.
       @handshake_timeout = handshake_timeout || HANDSHAKE_TIMEOUT
@@ -341,7 +346,7 @@ module MailSmtp
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
         max_connections_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
-        eight_bit_mime:, smtputf8:, logger:, logger_severity:)
+        min_data_rate:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
         raise ArgumentError, "Unknown starttls mode #{starttls.inspect}" unless STARTTLS_POLICIES.include?(starttls)
         raise ArgumentError, "max_recipients must be at least 100 (RFC 5321 §4.5.3.1)" if max_recipients < 100
@@ -359,6 +364,9 @@ module MailSmtp
         end
         unless max_exceptions.nil? || (max_exceptions.is_a?(Integer) && max_exceptions >= 1)
           raise ArgumentError, "max_exceptions must be nil or an Integer >= 1"
+        end
+        unless min_data_rate.nil? || (min_data_rate.is_a?(Integer) && min_data_rate >= 1)
+          raise ArgumentError, "min_data_rate must be nil or an Integer >= 1"
         end
         # A supplied logger arrives with a level already set, and honoring a severity
         # here would mean reaching into an object we don't own — quietly relevelling a
@@ -1204,11 +1212,13 @@ module MailSmtp
       # Send no SMTP replies until the terminating "." — then one success or error.
       def transfer_data(session, io, buffer, session_deadline: nil)
         idle_since = [ monotonic_time ]
+        data_started = idle_since[0]
+        bytes_received = [ 0 ]
         reader = DataReader.new(
           max_message_size: max_message_size,
           max_line_length: MAX_TEXT_LINE_LENGTH,
           on_headers: -> { headers_received(session) }
-        ) { read_data_line(io, buffer, idle_since, session_deadline) }
+        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received) }
 
         reader = PrefixedReader.new(received_header(session), reader) if @add_received
 
@@ -1263,15 +1273,17 @@ module MailSmtp
 
       # Next DATA line as dot-unstuffed bytes plus CRLF, or +nil+ at the terminator, which
       # counts only CRLF-terminated (RFC 5321 / CVE-2023-51764 smuggling): bare-LF is body.
-      def read_data_line(io, buffer, idle_since, session_deadline)
+      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received)
         loop do
           raise_if_session_expired(session_deadline)
+          raise_if_data_rate_too_low(data_started, bytes_received[0])
 
           body_line = buffer.take_body_line
           unless body_line
             fill_buffer(io, buffer) do
               raise_if_session_expired(session_deadline)
               raise_if_idle_timeout(idle_since[0])
+              raise_if_data_rate_too_low(data_started, bytes_received[0])
             end
 
             raise ConnectionLost, "Connection lost during DATA" if io.closed?
@@ -1291,6 +1303,7 @@ module MailSmtp
           return nil if line == "." && crlf
 
           line.slice!(0) if line[0] == "."
+          bytes_received[0] += line.bytesize + 2
           return "#{line}\r\n"
         end
       rescue LineBuffer::BufferOverrun
@@ -1353,6 +1366,15 @@ module MailSmtp
       def raise_if_idle_timeout(idle_since)
         if @read_timeout && monotonic_time - idle_since > @read_timeout
           raise ServiceUnavailable, "Read timed out"
+        end
+      end
+
+      # Without +read_timeout+ there is no grace for the first bytes to arrive in,
+      # so the rate is not enforced either.
+      def raise_if_data_rate_too_low(data_started, bytes_received)
+        if @min_data_rate && @read_timeout &&
+            monotonic_time > data_started + @read_timeout + bytes_received.fdiv(@min_data_rate)
+          raise ServiceUnavailable, "Data rate too low"
         end
       end
 
