@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - Added `min_data_rate` (default 500 bytes/s, `nil` disables), a minimum DATA rate past `read_timeout`, so a client dripping body lines can no longer hold a processing slot until `max_session_duration`
 
