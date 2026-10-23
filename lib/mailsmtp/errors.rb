@@ -10,6 +10,11 @@ module MailSmtp
   class ConnectionLost < ServiceUnavailable
   end
 
+  # 450 — this address has started more messages this minute than max_messages_per_ip allows
+  class RateLimited < Error
+    status 450, "Requested mail action not taken: too many messages from your address", enhanced: "4.7.1"
+  end
+
   # 451 — the app hit an unexpected error handling an otherwise-valid message
   class LocalError < Error
     status 451, "Requested action aborted: local error in processing", enhanced: "4.3.0"
@@ -18,6 +23,16 @@ module MailSmtp
   # 452 — envelope has more recipients than we allow in one transaction
   class TooManyRecipients < Error
     status 452, "Requested action not taken: too many recipients", enhanced: "4.5.3"
+  end
+
+  # 454 — this address has started more TLS sessions this minute than max_tls_sessions_per_ip allows
+  class TlsUnavailable < Error
+    status 454, "TLS not available due to temporary reason", enhanced: "4.7.0"
+  end
+
+  # 454 — this address has tried AUTH more times this minute than max_auth_attempts_per_ip allows
+  class AuthenticationTemporarilyUnavailable < Error
+    status 454, "Temporary authentication failure", enhanced: "4.7.0"
   end
 
   # 500 — command verb not recognized
