@@ -43,6 +43,14 @@ module MailSmtp
     MAX_SESSION_DURATION = 1800
     MAX_AUTH_FAILURES = 3
     MAX_EXCEPTIONS = 20
+    # Postfix's smtpd_error_sleep_time: the pause before each error reply once a
+    # session is past +error_sleep_after+ errors.
+    ERROR_SLEEP_TIME = 1
+    # Postfix's STRESS_README: with +stress_threshold+ of +max_connections+ admitted,
+    # the idle and handshake timeouts drop to STRESS_TIMEOUT (unless configured lower)
+    # and one protocol error ends a session, so a flood frees slots fast.
+    STRESS_TIMEOUT = 10
+    STRESS_MAX_EXCEPTIONS = 1
     # Only for the logger this class builds for itself — a supplied +logger+ brings
     # its own level.
     LOGGER_SEVERITY = Logger::INFO
@@ -142,12 +150,17 @@ module MailSmtp
       max_session_duration: MAX_SESSION_DURATION,
       max_auth_failures: MAX_AUTH_FAILURES,
       max_exceptions: MAX_EXCEPTIONS,
+      error_sleep_after: nil, error_sleep_time: ERROR_SLEEP_TIME, stress_threshold: nil,
+      max_messages_per_ip: nil, max_tls_sessions_per_ip: nil, max_auth_attempts_per_ip: nil,
       pending_input_limit: PENDING_INPUT_LIMIT,
       logger: nil, logger_severity: nil)
       validate_options(tls: tls, auth: auth, starttls: starttls, max_connections: max_connections,
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
         max_recipients: max_recipients, max_auth_failures: max_auth_failures,
         max_exceptions: max_exceptions, min_data_rate: min_data_rate,
+        error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
+        max_messages_per_ip: max_messages_per_ip,
+        max_tls_sessions_per_ip: max_tls_sessions_per_ip, max_auth_attempts_per_ip: max_auth_attempts_per_ip,
         eight_bit_mime: eight_bit_mime, smtputf8: smtputf8, logger: logger, logger_severity: logger_severity)
 
       @listeners = Array(listeners)
@@ -177,6 +190,15 @@ module MailSmtp
       @max_session_duration = max_session_duration
       @max_auth_failures = max_auth_failures
       @max_exceptions = max_exceptions
+      @error_sleep_after = error_sleep_after
+      @error_sleep_time = error_sleep_time
+      @stress_threshold = stress_threshold
+      @max_messages_per_ip = max_messages_per_ip
+      @max_tls_sessions_per_ip = max_tls_sessions_per_ip
+      @max_auth_attempts_per_ip = max_auth_attempts_per_ip
+      @message_rates = RateLimiter.new
+      @tls_session_rates = RateLimiter.new
+      @auth_attempt_rates = RateLimiter.new
       @pending_input_limit = pending_input_limit
 
       # The envelope grammar is settled once, from the same switches EHLO advertises.
@@ -233,6 +255,12 @@ module MailSmtp
 
     def processings_count
       @processing_threads.size
+    end
+
+    # Whether admissions have reached +stress_threshold+ of +max_connections+. Public
+    # so an application can tighten its own limits while it holds.
+    def stressed?
+      @stress_threshold && @admitted >= max_connections * @stress_threshold
     end
 
     # The configured host:port pairs — or, for supplied +listeners+, the addresses
@@ -346,7 +374,8 @@ module MailSmtp
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
         max_connections_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
-        min_data_rate:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
+        min_data_rate:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
+        max_auth_attempts_per_ip:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
         raise ArgumentError, "Unknown starttls mode #{starttls.inspect}" unless STARTTLS_POLICIES.include?(starttls)
         raise ArgumentError, "max_recipients must be at least 100 (RFC 5321 §4.5.3.1)" if max_recipients < 100
@@ -367,6 +396,24 @@ module MailSmtp
         end
         unless min_data_rate.nil? || (min_data_rate.is_a?(Integer) && min_data_rate >= 1)
           raise ArgumentError, "min_data_rate must be nil or an Integer >= 1"
+        end
+        unless error_sleep_after.nil? || (error_sleep_after.is_a?(Integer) && error_sleep_after >= 1)
+          raise ArgumentError, "error_sleep_after must be nil or an Integer >= 1"
+        end
+        unless error_sleep_time.is_a?(Numeric) && error_sleep_time >= 0
+          raise ArgumentError, "error_sleep_time must be a Numeric >= 0"
+        end
+        unless stress_threshold.nil? || (stress_threshold.is_a?(Float) && stress_threshold > 0 && stress_threshold <= 1)
+          raise ArgumentError, "stress_threshold must be nil or a Float above 0 and at most 1"
+        end
+        unless max_messages_per_ip.nil? || (max_messages_per_ip.is_a?(Integer) && max_messages_per_ip >= 1)
+          raise ArgumentError, "max_messages_per_ip must be nil or an Integer >= 1"
+        end
+        unless max_tls_sessions_per_ip.nil? || (max_tls_sessions_per_ip.is_a?(Integer) && max_tls_sessions_per_ip >= 1)
+          raise ArgumentError, "max_tls_sessions_per_ip must be nil or an Integer >= 1"
+        end
+        unless max_auth_attempts_per_ip.nil? || (max_auth_attempts_per_ip.is_a?(Integer) && max_auth_attempts_per_ip >= 1)
+          raise ArgumentError, "max_auth_attempts_per_ip must be nil or an Integer >= 1"
         end
         # A supplied logger arrives with a level already set, and honoring a severity
         # here would mean reaching into an object we don't own — quietly relevelling a
@@ -771,6 +818,7 @@ module MailSmtp
               rescue PipeliningNotSupported => e
                 session.exceptions += 1
                 log(session, Logger::ERROR, loggable_error(e), err: e)
+                sleep @error_sleep_time if error_sleep?(session)
                 respond(io, session, e.response)
                 # Drop the pipelined continuation still buffered (e.g. an AUTH credential)
                 # so it isn't re-read, logged unredacted, and run out of sequence.
@@ -780,6 +828,7 @@ module MailSmtp
                 session.exceptions += 1
                 session.auth_failures += 1 if e.is_a?(AuthenticationFailed)
                 log(session, Logger::ERROR, loggable_error(e), err: e)
+                sleep @error_sleep_time if error_sleep?(session)
                 respond(io, session, e.response)
                 raise_if_exception_caps(session, e)
               # A forced stop is not this command failing: a 451 and carrying on
@@ -789,6 +838,7 @@ module MailSmtp
               rescue StandardError => e
                 session.exceptions += 1
                 log(session, Logger::ERROR, loggable_error(e), err: e)
+                sleep @error_sleep_time if error_sleep?(session)
                 respond(io, session, LocalError.new.response)
                 raise_if_exception_caps(session, e)
               end
@@ -1086,6 +1136,7 @@ module MailSmtp
         raise CommandNotRecognized unless tls
         raise BadSequence unless session.phase == :ready
         raise BadSequence if session.encrypted?
+        raise TlsUnavailable if rate_limited?(session, @tls_session_rates, @max_tls_sessions_per_ip)
 
         session.phase = :starttls
         reply(220, "Ready to start TLS")
@@ -1095,6 +1146,7 @@ module MailSmtp
         raise CommandNotRecognized if @auth == :disabled
         raise BadSequence if session.phase != :ready || session.authenticated?
         raise EncryptionRequired if encryption_required? && !session.encrypted?
+        raise AuthenticationTemporarilyUnavailable if rate_limited?(session, @auth_attempt_rates, @max_auth_attempts_per_ip)
 
         auth_data = line.sub(/\AAUTH\s/i, "").strip.split(/\s+/)
         mechanism = auth_data[0].to_s.upcase
@@ -1133,6 +1185,7 @@ module MailSmtp
         raise BadSequence if session.phase != :ready
         raise EncryptionRequired if encryption_required? && !session.encrypted?
         raise AuthenticationRequired if @auth == :required && !session.authenticated?
+        raise RateLimited if rate_limited?(session, @message_rates, @max_messages_per_ip)
 
         data = line.sub(/\AMAIL FROM:/i, "").strip
         raise InvalidParameters if data.include?("\0")
@@ -1210,7 +1263,23 @@ module MailSmtp
       end
 
       # Send no SMTP replies until the terminating "." — then one success or error.
+      # The reply is assembled with the processing slot already handed back.
       def transfer_data(session, io, buffer, session_deadline: nil)
+        error = receive_data(session, io, buffer, session_deadline: session_deadline)
+
+        if error
+          session.exceptions += 1
+          log(session, Logger::ERROR, loggable_error(error), err: error)
+          sleep @error_sleep_time if error_sleep?(session)
+          error.response
+        else
+          reply(250, "Requested mail action okay, completed")
+        end
+      end
+
+      # Runs +receive+ over the body and drains to the terminating ".", returning the
+      # error to reply with, or nil on success.
+      def receive_data(session, io, buffer, session_deadline: nil)
         idle_since = [ monotonic_time ]
         data_started = idle_since[0]
         bytes_received = [ 0 ]
@@ -1259,14 +1328,7 @@ module MailSmtp
           end
         end
 
-        error ||= reader.failure
-        if error
-          session.exceptions += 1
-          log(session, Logger::ERROR, loggable_error(error), err: error)
-          error.response
-        else
-          reply(250, "Requested mail action okay, completed")
-        end
+        error || reader.failure
       ensure
         release_processing_slot
       end
@@ -1354,9 +1416,10 @@ module MailSmtp
       # Prefer the socket's own timeout, which interrupts OpenSSL's accept; Timeout is
       # the fallback for pure-Ruby +tls+ objects.
       def with_handshake_timeout(io)
+        handshake_timeout = stressed? ? [ @handshake_timeout, STRESS_TIMEOUT ].min : @handshake_timeout
         previous = io.respond_to?(:timeout) ? io.timeout : :unset
-        io.timeout = @handshake_timeout if io.respond_to?(:timeout=)
-        Timeout.timeout(@handshake_timeout) { yield }
+        io.timeout = handshake_timeout if io.respond_to?(:timeout=)
+        Timeout.timeout(handshake_timeout) { yield }
       ensure
         if previous != :unset && io.respond_to?(:timeout=)
           io.timeout = previous
@@ -1364,7 +1427,8 @@ module MailSmtp
       end
 
       def raise_if_idle_timeout(idle_since)
-        if @read_timeout && monotonic_time - idle_since > @read_timeout
+        read_timeout = stressed? ? [ @read_timeout, STRESS_TIMEOUT ].compact.min : @read_timeout
+        if read_timeout && monotonic_time - idle_since > read_timeout
           raise ServiceUnavailable, "Read timed out"
         end
       end
@@ -1507,9 +1571,25 @@ module MailSmtp
             session.auth_failures >= @max_auth_failures
           raise ServiceUnavailable, "Too many authentication failures"
         end
-        if @max_exceptions && session.exceptions >= @max_exceptions
+        max_exceptions = stressed? ? STRESS_MAX_EXCEPTIONS : @max_exceptions
+        if max_exceptions && session.exceptions >= max_exceptions
           raise ServiceUnavailable, "Too many protocol errors"
         end
+      end
+
+      # Postfix's smtpd_soft_error_limit: past +error_sleep_after+ errors, every further
+      # error reply waits +error_sleep_time+ first. Not under stress, whose one-error
+      # budget has already ended the session by then.
+      def error_sleep?(session)
+        @error_sleep_after && !stressed? && session.exceptions > @error_sleep_after
+      end
+
+      # Counts the attempt, then answers whether it went over +limit+. Keyed on
+      # +remote_ip+, which behind PROXY is the client the proxy named.
+      def rate_limited?(session, rates, limit)
+        return false unless limit
+
+        rates.count(session.remote_ip) > limit
       end
 
       # SO_LINGER with timeout 0 yields RST on close — used on forced stop so

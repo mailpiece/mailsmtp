@@ -7,6 +7,7 @@ require "mailsmtp/parameter_parser"
 require "mailsmtp/session"
 require "mailsmtp/data_reader"
 require "mailsmtp/line_buffer"
+require "mailsmtp/rate_limiter"
 require "mailsmtp/server"
 
 # Mail SMTP server.

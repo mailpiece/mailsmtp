@@ -215,7 +215,10 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 | `ServiceUnavailable`             | 421    | 4.3.2    | Service not available, closing transmission channel               |               |
 | `ConnectionLost`                 | 421    | 4.3.2    | (as `ServiceUnavailable`) — peer gone before a reply could arrive |               |
 | `LocalError`                     | 451    | 4.3.0    | Requested action aborted: local error in processing               |               |
+| `RateLimited`                    | 450    | 4.7.1    | Requested mail action not taken: too many messages from your address |            |
 | `TooManyRecipients`              | 452    | 4.5.3    | Requested action not taken: too many recipients                   |               |
+| `TlsUnavailable`                 | 454    | 4.7.0    | TLS not available due to temporary reason                         |               |
+| `AuthenticationTemporarilyUnavailable` | 454 | 4.7.0  | Temporary authentication failure                                  |               |
 | `CommandNotRecognized`           | 500    | 5.5.1    | Syntax error, command unrecognized                                |               |
 | `LineTooLong`                    | 500    | 5.5.2    | Line too long                                                     |               |
 | `PipeliningNotSupported`         | 500    | 5.5.2    | Pipelining is not supported; commands must be sent one at a time  |               |
@@ -320,6 +323,12 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `max_processings_wait`   | `30`                | Seconds to wait for a DATA processing slot before 421                                                                                                                                   |
 | `max_auth_failures`      | `3`                 | Failed AUTH attempts before 421; `nil` disables                                                                                                                                         |
 | `max_exceptions`         | `20`                | Protocol errors before 421; `nil` disables                                                                                                                                              |
+| `error_sleep_after`      | `nil`               | Errors a session may make before each further error reply is delayed by `error_sleep_time` (Postfix `smtpd_soft_error_limit`); `nil` disables                                           |
+| `error_sleep_time`       | `1`                 | Seconds an error reply waits once the session is past `error_sleep_after` (Postfix `smtpd_error_sleep_time`)                                                                           |
+| `stress_threshold`       | `nil`               | Share of `max_connections` (a Float above 0, at most 1) at which the server is stressed: 10 s idle and handshake timeouts, one protocol error per session. `nil` disables               |
+| `max_messages_per_ip`    | `nil`               | MAIL FROM per client address per minute; over it, 450 (`RateLimited`). `nil` disables                                                                                                   |
+| `max_tls_sessions_per_ip` | `nil`              | STARTTLS per client address per minute; over it, 454 (`TlsUnavailable`) before any handshake. `nil` disables                                                                            |
+| `max_auth_attempts_per_ip` | `nil`             | AUTH commands per client address per minute; over it, 454 (`AuthenticationTemporarilyUnavailable`). `nil` disables                                                                      |
 | `read_timeout`           | `300`               | Idle read timeout (seconds); RFC 5321 §4.5.3.2.7; `nil` disables                                                                                                                        |
 | `min_data_rate`          | `500`               | DATA must arrive at this many bytes/s after `read_timeout` of grace (Postfix `smtpd_min_data_rate`), else 421; `nil` disables, as does `read_timeout: nil`                              |
 | `write_timeout`          | `30`                | Reply write timeout (seconds)                                                                                                                                                           |
@@ -333,6 +342,18 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 `starttls: :required` requires a non-nil `tls` object. Per-IP connection caps are deferred for peers in `proxy_hosts` until PROXY rewrites the client address. Forced `#stop` aborts lingering sockets with RST (`SO_LINGER 0`). Inspect live load with `connections_count` / `processings_count` (and `connections?`).
 
 A forced `#stop` raises `MailSmtp::Server::StopConnection` into any connection still working — including one sitting inside your `receive`. It descends from `Exception`, not `StandardError`, so a `rescue StandardError` wrapped around a storage call won't swallow it and stall the shutdown. If you do catch it — a bare `rescue Exception`, or to record a partial write — re-raise it; a connection that keeps hold of its stop is abandoned and its socket reset once the drain grace expires.
+
+#### Per-IP rate limits
+
+`max_messages_per_ip`, `max_tls_sessions_per_ip` and `max_auth_attempts_per_ip` are per-minute caps on one client address, after Postfix's anvil limits. Each counts in fixed one-minute windows, in memory, and an IPv6 client counts by its /64. The attempt is counted and then refused with a temporary error, so a well-behaved sender retries later: MAIL FROM answers 450 and the envelope stays closed, STARTTLS answers 454 without starting a handshake, and AUTH answers 454 before the mechanism runs. Only the AUTH command counts, not the base64 lines that follow it. The address is `session.remote_ip`, so behind PROXY it is the client the proxy named. All three are off by default.
+
+#### Stress
+
+With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller) and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
+
+#### Error tarpit
+
+With `error_sleep_after` set, a session past that many errors waits `error_sleep_time` seconds (default 1) before each further error reply (Postfix's `smtpd_soft_error_limit` and `smtpd_error_sleep_time`), which costs a client probing for commands more than it costs you. A stressed server skips the wait: its one-error budget has already ended the session. Off by default.
 
 ## Testing
 
