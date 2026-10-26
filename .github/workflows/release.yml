@@ -11,17 +11,17 @@ jobs:
       id-token: write   # required for RubyGems Trusted Publishing
       contents: write   # required for rake release to push the release tag
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
         with:
           bundler-cache: true
       - name: Run tests
         run: bundle exec rake
       - name: Publish to RubyGems.org
-        uses: rubygems/release-gem@v1
+        uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
       - name: Set release tag and notes
         id: tag
         run: |
@@ -33,7 +33,7 @@ jobs:
             keep { print }
           ' CHANGELOG.md > release-notes.md
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: pkg/mailsmtp-*.gem
