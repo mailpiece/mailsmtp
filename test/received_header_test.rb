@@ -23,6 +23,16 @@ class MailSmtp::ReceivedHeaderTest < MailSmtp::ServerIntegrationTest
       server.received[:data].to_s[/\AReceived: from (\S+) /, 1]
   end
 
+  def test_whitespace_around_a_helo_name_is_dropped
+    server = ReceivingServer.new(**server_options(add_received: true))
+    start(server)
+
+    deliver_with_helo(port, " \t mail-01.test.client.example \t")
+
+    assert_equal "mail-01.test.client.example",
+      server.received[:data].to_s[/\AReceived: from (\S+) /, 1]
+  end
+
   # CR/LF are already stripped; this guards against forgery via an unbalanced "(" hiding the real client IP.
   def test_neuters_a_hostile_helo_before_it_reaches_the_received_header
     server = ReceivingServer.new(**server_options(add_received: true))
