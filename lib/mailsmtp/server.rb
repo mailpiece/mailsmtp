@@ -978,7 +978,7 @@ module MailSmtp
         end
 
         case line
-        when /\A(HELO|EHLO)(\s+.*)?\z/i
+        when /\A(HELO|EHLO)(\s.*)?\z/i
             process_helo(session, line)
         when /\APROXY(\s+)/i
             process_proxy(session, line)
@@ -988,15 +988,15 @@ module MailSmtp
         # a second copy of the base64 alphabet here would only drift.
         when /\AAUTH(\s+)(\S+)(\s+\S+)?\s*\z/i
             process_auth(session, line)
-        when /\ANOOP(\s+.*)?\z/i
+        when /\ANOOP(\s.*)?\z/i
             reply(250, "OK")
-        when /\AVRFY(\s+.*)?\z/i
+        when /\AVRFY(\s.*)?\z/i
             # RFC 5321 §3.5 / §4.5.1: always implement VRFY; 252 is the safe
             # answer when we will not confirm mailbox existence.
             reply(252, "Cannot VRFY user, but will accept message and attempt delivery", enhanced: "2.5.0")
-        when /\AEXPN(\s+.*)?\z/i
+        when /\AEXPN(\s.*)?\z/i
             raise CommandNotImplemented
-        when /\AHELP(\s+.*)?\z/i
+        when /\AHELP(\s.*)?\z/i
             raise CommandNotImplemented
         when /\ARSET\s*\z/i
             process_rset(session)
@@ -1009,7 +1009,7 @@ module MailSmtp
             process_rcpt_to(session, line)
         when /\ADATA\s*\z/i
             process_data_start(session)
-        when /\A(GET|POST|CONNECT)(\s+.*)?\z/i
+        when /\A(GET|POST|CONNECT)(\s.*)?\z/i
             process_cross_protocol_request(session)
         else
             unknown_command(session, line)
@@ -1021,7 +1021,7 @@ module MailSmtp
         raise BadSequence if auth_value_phase?(session.phase) || session.phase == :data
 
         # Bare HELO/EHLO (no argument) must not treat the verb as the hostname.
-        match = line.match(/\A(HELO|EHLO)(?:\s+(.*))?\z/i)
+        match = line.match(/\A(HELO|EHLO)(?:\s(.*))?\z/i)
         name = match[2].to_s.strip
         raise InvalidParameters if name.empty?
         name = neuter_helo(name)
