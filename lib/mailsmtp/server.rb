@@ -76,8 +76,9 @@ module MailSmtp
     # A failed accept is classified, not counted. Running out of descriptors is the
     # usual reason a public MX cannot accept, and it clears itself as connections
     # close, so the listener backs off and waits it out instead of counting toward a
-    # stop it never comes back from.
-    ACCEPT_BACKOFF_ERRORS = [ Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM ].freeze
+    # stop it never comes back from. So does running out of threads, which drops only
+    # the client that could not get one.
+    ACCEPT_BACKOFF_ERRORS = [ Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM, ThreadError ].freeze
     # This connection died between the kernel queueing it and us taking it. Nothing
     # is wrong with the listener, so there is nothing to wait for either.
     ACCEPT_RETRY_ERRORS = [ Errno::ECONNABORTED, Errno::EPROTO, Errno::EINTR ].freeze

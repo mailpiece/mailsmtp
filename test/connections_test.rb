@@ -195,6 +195,21 @@ class MailSmtp::ConnectionsTest < MailSmtp::ServerIntegrationTest
     close(holder) if holder
   end
 
+  # Fails to start the first connection's thread, as Thread.new does past pids.max.
+  class ThreadStarvedServer < MailSmtp::Server
+    private
+      def start_connection_thread(client)
+        if @starved
+          super
+        else
+          @starved = true
+          release_admission
+          close_socket(client)
+          raise ThreadError, "can't create Thread: Resource temporarily unavailable"
+        end
+      end
+  end
+
   # Descriptor exhaustion is transient — it clears as connections close — so the
   # listener waits it out. Giving up would leave the process alive and healthy-looking
   # with nothing answering the port.
@@ -205,6 +220,17 @@ class MailSmtp::ConnectionsTest < MailSmtp::ServerIntegrationTest
       logger: Logger.new(IO::NULL))))
 
     assert_match(/\A220 /, read_smtp_response(connect(port_of(listener))).to_s)
+    assert_equal false, server.stopped?
+  end
+
+  # Out of threads (pids.max, memory) clears as connections close, like descriptors:
+  # that client is dropped and the listener carries on.
+  def test_keeps_listening_when_a_connection_thread_cannot_be_started
+    server = start(ThreadStarvedServer.new(**server_options(logger: Logger.new(IO::NULL))))
+
+    first = connect(port)
+    assert_nil first.gets
+    assert_match(/\A220 /, read_smtp_response(connect(port)).to_s)
     assert_equal false, server.stopped?
   end
 
