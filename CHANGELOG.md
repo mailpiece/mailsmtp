@@ -14,6 +14,7 @@
 - Fixed: `false` from `authenticate` refuses the login with a 535 instead of authenticating
 - Changed: a control character or DEL in a MAIL FROM or RCPT TO mailbox is refused with a 501
 - Changed: a client's command logs at DEBUG with control characters as `?`, as Postfix's `printable()`
+- Changed: `max_connections_per_ip` counts an IPv6 client by its /64 and `::ffff:a.b.c.d` as `a.b.c.d`, as the per-IP rates do
 
 ## 0.7.0
 

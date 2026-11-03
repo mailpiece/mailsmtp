@@ -726,7 +726,7 @@ module MailSmtp
             if enforce_per_ip && ip_cap_reached?(remote_ip)
               :max_connections_per_ip
             else
-              @connection_ips[Thread.current] = remote_ip
+              @connection_ips[Thread.current] = ClientKey.of(remote_ip)
               nil
             end
           elsif max_connections && @connection_threads.size >= max_connections
@@ -735,7 +735,7 @@ module MailSmtp
             :max_connections_per_ip
           else
             @connection_threads << Thread.current
-            @connection_ips[Thread.current] = remote_ip
+            @connection_ips[Thread.current] = ClientKey.of(remote_ip)
             nil
           end
         end
@@ -743,11 +743,13 @@ module MailSmtp
         refuse_session(remote_ip, limit) if limit
       end
 
-      # Our own entry never counts against us: a re-claim is one connection
-      # being reattributed, not a second one arriving.
+      # Counted by client, an IPv6 one by its /64 (+ClientKey+). Our own entry never
+      # counts against us: a re-claim is one connection being reattributed, not a
+      # second one arriving.
       def ip_cap_reached?(remote_ip)
         if max_connections_per_ip && remote_ip
-          taken = @connection_ips.count { |thread, ip| ip == remote_ip && thread != Thread.current }
+          client = ClientKey.of(remote_ip)
+          taken = @connection_ips.count { |thread, key| key == client && thread != Thread.current }
           taken >= max_connections_per_ip
         end
       end

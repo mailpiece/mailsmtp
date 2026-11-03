@@ -191,6 +191,23 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     assert_equal 1, replies.count { |reply| reply.start_with?("421") }
   end
 
+  # A host is normally handed a whole IPv6 /64, and an IPv4 client can arrive as
+  # ::ffff:a.b.c.d, so the cap counts clients as the per-IP rates do.
+  def test_the_per_ip_cap_counts_an_ipv6_client_by_its_64_and_a_mapped_ipv4_as_its_host
+    start_server(proxy_hosts: [ "127.0.0.1" ], max_connections_per_ip: 1)
+
+    replies = [
+      "TCP6 2001:db8::1 ::1", "TCP6 2001:db8::2 ::1", "TCP6 2001:db8:0:1::1 ::1",
+      "TCP4 192.0.2.7 127.0.0.1", "TCP6 ::ffff:192.0.2.7 ::1"
+    ].map do |endpoints|
+      socket = connect(port)
+      socket.print("PROXY #{endpoints} 40000 #{port}\r\n")
+      read_smtp_response(socket).to_s[0, 3]
+    end
+
+    assert_equal %w[ 220 421 220 220 421 ], replies
+  end
+
   # PROXY UNKNOWN names no client for the cap to move to, so it falls back on
   # the peer rather than leaving the connection exempt for good.
   def test_proxy_unknown_applies_the_per_ip_cap_to_the_peer
