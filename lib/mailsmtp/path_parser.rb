@@ -5,6 +5,9 @@ module MailSmtp
     # RFC 5321 §4.5.3.1.3: a path is at most 256 octets, brackets included. The
     # 64-octet local part (§4.5.3.1.1) is not: Gmail's "…+caf_=…" runs 66–72.
     MAX_PATH_LENGTH = 256
+    # C0 and DEL, which no mailbox carries (RFC 5321 §4.1.2) and which reach logs,
+    # headers and shells verbatim.
+    CONTROL_CHARACTER = /[\x00-\x1f\x7f]/
 
     # +strict+ demands the angle brackets; +smtputf8+ admits a non-ASCII mailbox
     # (RFC 6531 §3.4), which the engine otherwise refuses on the application's behalf.
@@ -106,6 +109,7 @@ module MailSmtp
       def mailbox_in(path)
         mailbox = strip_source_route(path)
         raise InvalidParameters, "Quoted local part" if mailbox.start_with?('"')
+        raise InvalidParameters, "Control character in path" if mailbox.match?(CONTROL_CHARACTER)
         mailbox
       end
 

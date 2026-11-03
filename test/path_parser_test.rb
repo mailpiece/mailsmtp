@@ -67,6 +67,14 @@ class MailSmtp::PathParserTest < MailSmtp::TestCase
     assert_equal "Quoted local part", error.message
   end
 
+  # TAB, ESC and DEL reach logs, headers and shells that read the address.
+  def test_refuses_a_control_character_in_the_mailbox
+    [ "\t", "\e", "\x7f", "\x01" ].each do |control|
+      assert_raises(MailSmtp::InvalidParameters) { strict.address_in("<a#{control}b@example.com>") }
+      assert_raises(MailSmtp::InvalidParameters) { loose.address_in("a#{control}b@example.com") }
+    end
+  end
+
   def test_refuses_a_half_bracketed_path
     assert_raises(MailSmtp::InvalidParameters) { strict.address_in("<sender@example.com") }
     assert_raises(MailSmtp::InvalidParameters) { loose.address_in("sender@example.com>") }

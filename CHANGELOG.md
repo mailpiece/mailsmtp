@@ -12,6 +12,7 @@
 - Fixed: a connection thread that cannot be started no longer stops the listener; it backs off as it does when out of descriptors
 - Fixed: a command line past `pending_input_limit` gets a 421 logged at INFO, not an ERROR
 - Fixed: `false` from `authenticate` refuses the login with a 535 instead of authenticating
+- Changed: a control character or DEL in a MAIL FROM or RCPT TO mailbox is refused with a 501
 
 ## 0.7.0
 
