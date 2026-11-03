@@ -224,6 +224,19 @@ def before_banner(session, io)
 end
 ```
 
+#### Observers
+
+For metrics, the engine also reports what it decided on its own. These hooks are called once it has acted and their return value is ignored. An exception raised in one is logged at ERROR, as an error in `receive` would be, and the connection carries on.
+
+| Hook                  | Signature            | Called                                                                                                                                                               |
+| --------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `connection_refused`  | `(remote_ip, limit)` | a connection is refused with a 421 at `limit`: `:max_connections` in the acceptor, before any session, or `:max_connections_per_ip` before `connected`               |
+| `error_slept`         | `(session, seconds)` | an error reply waited `seconds` past `error_sleep_after`, before it is written                                                                                       |
+| `error_limit_reached` | `(session)`          | `max_exceptions` (one error under stress) ends the session, before its 421                                                                                           |
+| `replied`             | `(session, code)`    | a reply was written, with its numeric code: the banner, a multiline reply once, the closing 221 or 421                                                               |
+
+`connection_refused` runs on the acceptor for `max_connections`, so keep it quick. `remote_ip` is the peer's address (the proxy's, behind PROXY, for `:max_connections`), or `nil` when the peer was already gone.
+
 
 
 

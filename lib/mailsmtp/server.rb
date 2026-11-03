@@ -354,6 +354,26 @@ module MailSmtp
       raise CommandNotRecognized
     end
 
+    # Observers, for metrics: called once the engine has acted, never asked to decide.
+    # An exception raised in one is logged and the connection carries on.
+
+    # +limit+ is +:max_connections+, answered on the acceptor thread, so keep it quick,
+    # or +:max_connections_per_ip+. +remote_ip+ is nil for a peer already gone.
+    def connection_refused(remote_ip, limit)
+    end
+
+    # After the error tarpit's wait, before the error reply is written.
+    def error_slept(session, seconds)
+    end
+
+    # When +max_exceptions+ ends the session, before its 421.
+    def error_limit_reached(session)
+    end
+
+    # After each reply is written, with its numeric code.
+    def replied(session, code)
+    end
+
     # Override to supply a Session subclass.
     def build_session
       Session.new
@@ -590,10 +610,12 @@ module MailSmtp
       def refuse_connection(client)
         log(nil, Logger::WARN, "Refused a connection past max_connections (#{max_connections})")
         client.write_nonblock("#{ServiceUnavailable.new.response}\r\n", exception: false)
+        remote_ip = client.peeraddr(:numeric)[3]
       rescue StandardError
         # The peer is already gone, and the close below is all that is left to do.
       ensure
         close_socket(client)
+        observing(nil) { connection_refused(remote_ip, :max_connections) }
       end
 
       def close_socket(socket)
@@ -688,31 +710,48 @@ module MailSmtp
       # its line is read. +enforce_per_ip: false+ spares an allowlisted PROXY peer's
       # shared IP. The global cap is answered in the acceptor and re-checked here as a
       # backstop for anything that reaches a connection without going through admission.
+      # The refusal is raised outside the lock, so +connection_refused+ never runs under it.
       def claim_connection_slot(remote_ip, enforce_per_ip: true)
-        @slot_mutex.synchronize do
+        limit = @slot_mutex.synchronize do
           if @connection_threads.include?(Thread.current)
             # The re-check runs even when the address is unchanged: a PROXY line naming
             # the peer's own IP would otherwise leave this connection exempt for life.
-            raise_if_ip_cap_reached(remote_ip) if enforce_per_ip
-            @connection_ips[Thread.current] = remote_ip
-          else
-            if max_connections && @connection_threads.size >= max_connections
-              raise ServiceUnavailable, "Dropping connection: max_connections (#{max_connections}) reached"
+            if enforce_per_ip && ip_cap_reached?(remote_ip)
+              :max_connections_per_ip
+            else
+              @connection_ips[Thread.current] = remote_ip
+              nil
             end
-            raise_if_ip_cap_reached(remote_ip) if enforce_per_ip
-
+          elsif max_connections && @connection_threads.size >= max_connections
+            :max_connections
+          elsif enforce_per_ip && ip_cap_reached?(remote_ip)
+            :max_connections_per_ip
+          else
             @connection_threads << Thread.current
             @connection_ips[Thread.current] = remote_ip
+            nil
           end
         end
+
+        refuse_session(remote_ip, limit) if limit
       end
 
       # Our own entry never counts against us: a re-claim is one connection
       # being reattributed, not a second one arriving.
-      def raise_if_ip_cap_reached(remote_ip)
+      def ip_cap_reached?(remote_ip)
         if max_connections_per_ip && remote_ip
           taken = @connection_ips.count { |thread, ip| ip == remote_ip && thread != Thread.current }
-          raise ServiceUnavailable, "Too many connections from #{remote_ip}" if taken >= max_connections_per_ip
+          taken >= max_connections_per_ip
+        end
+      end
+
+      def refuse_session(remote_ip, limit)
+        observing(nil) { connection_refused(remote_ip, limit) }
+
+        if limit == :max_connections
+          raise ServiceUnavailable, "Dropping connection: max_connections (#{max_connections}) reached"
+        else
+          raise ServiceUnavailable, "Too many connections from #{remote_ip}"
         end
       end
 
@@ -830,7 +869,7 @@ module MailSmtp
               rescue PipeliningNotSupported => e
                 session.exceptions += 1
                 log(session, Logger::ERROR, loggable_error(e), err: e)
-                sleep @error_sleep_time if error_sleep?(session)
+                error_sleep(session)
                 respond(io, session, e.response)
                 # Drop the pipelined continuation still buffered (e.g. an AUTH credential)
                 # so it isn't re-read, logged unredacted, and run out of sequence.
@@ -840,7 +879,7 @@ module MailSmtp
                 session.exceptions += 1
                 session.auth_failures += 1 if e.is_a?(AuthenticationFailed)
                 log(session, Logger::ERROR, loggable_error(e), err: e)
-                sleep @error_sleep_time if error_sleep?(session)
+                error_sleep(session)
                 respond(io, session, e.response)
                 raise_if_exception_caps(session, e)
               # A forced stop is not this command failing: a 451 and carrying on
@@ -850,7 +889,7 @@ module MailSmtp
               rescue StandardError => e
                 session.exceptions += 1
                 log(session, Logger::ERROR, loggable_error(e), err: e)
-                sleep @error_sleep_time if error_sleep?(session)
+                error_sleep(session)
                 respond(io, session, LocalError.new.response)
                 raise_if_exception_caps(session, e)
               end
@@ -990,6 +1029,8 @@ module MailSmtp
           else
             io.print("#{output}\r\n")
           end
+
+          observing(session) { replied(session, output.to_i) }
         end
       rescue Timeout::Error, IO::TimeoutError
         raise ServiceUnavailable, "Write timed out"
@@ -1309,7 +1350,7 @@ module MailSmtp
         if error
           session.exceptions += 1
           log(session, Logger::ERROR, loggable_error(error), err: error)
-          sleep @error_sleep_time if error_sleep?(session)
+          error_sleep(session)
           error.response
         else
           reply(250, "Requested mail action okay, completed")
@@ -1612,6 +1653,7 @@ module MailSmtp
         end
         max_exceptions = stressed? ? STRESS_MAX_EXCEPTIONS : @max_exceptions
         if max_exceptions && session.exceptions >= max_exceptions
+          observing(session) { error_limit_reached(session) }
           raise ServiceUnavailable, "Too many protocol errors"
         end
       end
@@ -1621,6 +1663,23 @@ module MailSmtp
       # budget has already ended the session by then.
       def error_sleep?(session)
         @error_sleep_after && !stressed? && session.exceptions > @error_sleep_after
+      end
+
+      def error_sleep(session)
+        if error_sleep?(session)
+          sleep @error_sleep_time
+          observing(session) { error_slept(session, @error_sleep_time) }
+        end
+      end
+
+      # An observer that fails must not cost the client its reply or the acceptor its loop,
+      # but a stop raised into the acceptor while it observes is still a stop.
+      def observing(session)
+        yield
+      rescue StopService
+        raise
+      rescue StandardError => e
+        log(session, Logger::ERROR, loggable_error(e), err: e)
       end
 
       # Counts the attempt, then answers whether it went over +limit+. Keyed on
