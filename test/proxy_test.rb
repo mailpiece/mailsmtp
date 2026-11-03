@@ -106,6 +106,30 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A421 /, read_smtp_response(socket).to_s)
   end
 
+  # A stray header is dropped as one, not refused as pipelining.
+  def test_refuses_a_second_proxy_header_with_a_line_behind_it
+    start_server(proxy_hosts: [ "127.0.0.1" ])
+
+    socket = connect(port)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    read_smtp_response(socket)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\nEHLO test.client.example\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
+  # The header is read before the banner, so it buys a client no pipelining after it.
+  def test_refuses_a_pipelined_second_command_behind_proxy
+    start_server(proxy_hosts: [ "127.0.0.1" ])
+
+    socket = connect(port)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    read_smtp_response(socket)
+    socket.print("EHLO test.client.example\r\nNOOP\r\n")
+
+    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+  end
+
   # PROXY belongs to the connection, not to what STARTTLS resets.
   def test_proxy_is_not_required_again_after_starttls
     start_server(proxy_hosts: [ "127.0.0.1" ], tls: FakeTls.new)

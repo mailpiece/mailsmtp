@@ -104,8 +104,9 @@ module MailSmtp
     # v1 §2.1: the longest header, TCP6 with every field at its widest, is 107
     # bytes with its CRLF.
     PROXY_HEADER_BYTES = 107
+    PROXY_LINE = /\APROXY(\s+)/i
     private_constant :PROXY_TRANSPORTS, :PROXY_UNSPECIFIED, :PROXY_ENDPOINT_FIELDS,
-      :PROXY_ADDRESS, :PROXY_PORT, :PROXY_HEADER_BYTES
+      :PROXY_ADDRESS, :PROXY_PORT, :PROXY_HEADER_BYTES, :PROXY_LINE
 
     # Raised into the acceptor threads by +stop+, and deliberately a StandardError
     # where StopConnection is an Exception: an acceptor runs no application code, so
@@ -803,7 +804,8 @@ module MailSmtp
               begin
                 raise_if_session_expired(session_deadline)
                 raise_if_idle_timeout(idle_since)
-                raise PipeliningNotSupported if buffer.pending_line? && !pipelining_allowed?(session)
+                # Body lines are not covered: +read_data_line+ takes them from the reader itself.
+                raise PipeliningNotSupported if buffer.pending_line? && !@pipelining && !stray_proxy_line?(session, line)
 
                 max_line = auth_line_length?(session, line) ? MAX_AUTH_LINE_LENGTH : MAX_COMMAND_LINE_LENGTH
                 raise InvalidParameters, "Command line too long" if line.bytesize + 2 > max_line
@@ -1010,14 +1012,14 @@ module MailSmtp
       def process_command_line(session, line)
         # An allowlisted peer skips the per-IP cap until PROXY names the real client,
         # so require PROXY first (v1: a receiver must not guess) — not an open exemption.
-        if proxy_allowed?(session.remote_ip) && !session.proxy && !line.match?(/\APROXY(\s+)/i)
+        if proxy_allowed?(session.remote_ip) && !session.proxy && !line.match?(PROXY_LINE)
           raise ServiceUnavailable, "Dropping connection: #{session.remote_ip} must send PROXY first"
         end
 
         case line
         when /\A(HELO|EHLO)(\s.*)?\z/i
             process_helo(session, line)
-        when /\APROXY(\s+)/i
+        when PROXY_LINE
             process_proxy(session, line)
         when /\ASTARTTLS\s*\z/i
             process_starttls(session)
@@ -1640,10 +1642,10 @@ module MailSmtp
         # already gone
       end
 
-      # Body lines are not covered: +read_data_line+ takes them from the reader itself.
-      # PROXY is exempt because real clients send HELO/EHLO straight behind the preamble.
-      def pipelining_allowed?(session)
-        @pipelining || (proxy_enabled? && session.phase == :helo)
+      # A valid header is read before the banner, so one here is stray: let it reach
+      # +process_proxy+, which closes on it in +:helo+ (elsewhere it is a 503 or 500).
+      def stray_proxy_line?(session, line)
+        proxy_enabled? && session.phase == :helo && line.match?(PROXY_LINE)
       end
   end
 end
