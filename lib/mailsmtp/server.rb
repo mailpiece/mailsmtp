@@ -1524,18 +1524,21 @@ module MailSmtp
         end
       end
 
+      def idle_timeout
+        stressed? ? [ @read_timeout, STRESS_TIMEOUT ].compact.min : @read_timeout
+      end
+
       def raise_if_idle_timeout(idle_since)
-        read_timeout = stressed? ? [ @read_timeout, STRESS_TIMEOUT ].compact.min : @read_timeout
-        if read_timeout && monotonic_time - idle_since > read_timeout
+        if idle_timeout && monotonic_time - idle_since > idle_timeout
           raise ServiceUnavailable, "Read timed out"
         end
       end
 
-      # Without +read_timeout+ there is no grace for the first bytes to arrive in,
-      # so the rate is not enforced either.
+      # The grace for the first bytes is the idle timeout, shortened under stress like
+      # it; without one the rate is not enforced either.
       def raise_if_data_rate_too_low(data_started, bytes_received)
-        if @min_data_rate && @read_timeout &&
-            monotonic_time > data_started + @read_timeout + bytes_received.fdiv(@min_data_rate)
+        if @min_data_rate && idle_timeout &&
+            monotonic_time > data_started + idle_timeout + bytes_received.fdiv(@min_data_rate)
           raise ServiceUnavailable, "Data rate too low"
         end
       end

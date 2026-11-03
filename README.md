@@ -385,7 +385,7 @@ A forced `#stop` raises `MailSmtp::Server::StopConnection` into any connection s
 
 #### Stress
 
-With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller) and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
+With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout, the DATA rate's grace and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller) and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
 
 #### Error tarpit
 
