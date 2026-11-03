@@ -107,21 +107,31 @@ server = MyServer.new(
 server.start
 ```
 
-`tls:` takes an `OpenSSL::SSL::SSLContext`, built like any other Ruby TLS server:
+`tls:` takes any object with a `start(io)` that runs the server side of the handshake on the client's socket and returns the encrypted one. For OpenSSL, wrap an `OpenSSL::SSL::SSLContext`:
 
 ```ruby
+class Tls
+  def initialize(context)
+    @context = context
+  end
+
+  def start(io)
+    OpenSSL::SSL::SSLSocket.new(io, @context).accept
+  end
+end
+
 tls_context = OpenSSL::SSL::SSLContext.new
 tls_context.cert = OpenSSL::X509::Certificate.new(File.read("cert.pem"))
 tls_context.key = OpenSSL::PKey::RSA.new(File.read("key.pem"))
 
-server = MyServer.new(host: "127.0.0.1", port: 2525, tls: tls_context,
+server = MyServer.new(host: "127.0.0.1", port: 2525, tls: Tls.new(tls_context),
   auth: :disabled, starttls: :optional, max_connections: 100, max_processings: 4)
 ```
 
 You can hot-swap the STARTTLS certificate without restarting — e.g. after a renewal replaces `cert.pem`/`key.pem`:
 
 ```ruby
-server.tls = new_tls_context
+server.tls = Tls.new(new_tls_context)
 ```
 
 For multi-listen, `hosts:` / `ports:` expand to every host×port pair.
