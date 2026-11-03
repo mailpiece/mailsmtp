@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the `before_banner(session, io)` hook, called with the client's socket before the banner
 - Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header
 
 ## 0.7.0

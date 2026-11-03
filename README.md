@@ -186,6 +186,7 @@ end
 | Hook                | Signature                                            | Return / raise                                                                                                                                                                                                |
 | ------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `connected`         | `(session)`                                          | —                                                                                                                                                                                                             |
+| `before_banner`     | `(session, io)`                                      | once, after `connected`, before the `220`; peek at `io`, don't read it ([Before the banner](#before-the-banner))                                                                                              |
 | `disconnected`      | `(session)`                                          | —                                                                                                                                                                                                             |
 | `helo`              | `(session, name)`                                    | after STARTTLS, `session.tls_version` / `session.tls_cipher` are set                                                                                                                                          |
 | `proxy`             | `(session, proxy_data)`                              | hash replaces PROXY data; runs before `connected`                                                                                                                                                             |
@@ -201,6 +202,27 @@ end
 | `process_line`      | `(session, line)`                                    | override for policy; call `super` for dispatch — dispatches on `session.phase` ([Session and Envelope](#session-and-envelope))                                                                                |
 | `unknown_command`   | `(session, line)`                                    | default raises `CommandNotRecognized`                                                                                                                                                                         |
 | `log`               | `(session, severity, msg, err:)`                     | —                                                                                                                                                                                                             |
+
+#### Before the banner
+
+A connection opens in this order: the PROXY header, when the peer is in `proxy_hosts` (the `proxy` hook runs as it is read); then `connected`; then `before_banner`; then the `220` banner. Both hooks see `session.remote_ip` as the client the proxy names, and either may set `session.banner`.
+
+`before_banner` is where a check on the client's first moments goes, such as refusing one that talks before the banner (Postfix's pregreet test). `io` is the plain socket, before any STARTTLS, and the engine has read nothing from it but the PROXY header, which it reads a byte at a time so that whatever the client sent behind it is still there. Wait on it (`IO.select`) and peek at it (`recv_nonblock(n, Socket::MSG_PEEK)`), but don't read from it if the session is to go on: bytes taken off the socket never reach the engine. The engine puts no timeout around the hook, so bound your own wait.
+
+Raise a `ServiceUnavailable`, or a subclass declaring its own status, to send that reply and close the connection, as from `connected`; any other error is answered with a plain 421. `disconnected` still runs. Closing a socket with unread input makes the kernel send a TCP reset, which can reach the client ahead of the reply and lose it, so read off what the client sent before raising:
+
+```ruby
+class EarlyTalker < MailSmtp::ServiceUnavailable
+  status 554, "Protocol error: talking before the greeting", enhanced: "5.7.1"
+end
+
+def before_banner(session, io)
+  if IO.select([ io ], nil, nil, 6)
+    # Read it off, or the close resets the connection before the 554 arrives.
+    raise EarlyTalker if io.read_nonblock(4096, exception: false).is_a?(String)
+  end
+end
+```
 
 
 

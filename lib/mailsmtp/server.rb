@@ -309,6 +309,11 @@ module MailSmtp
     def connected(session)
     end
 
+    # Optional: once per connection, after +connected+ and before the banner, with
+    # the client's socket to wait on and peek at (README).
+    def before_banner(session, io)
+    end
+
     def disconnected(session)
     end
 
@@ -756,6 +761,7 @@ module MailSmtp
           read_proxy_header(session, io, session_deadline) if proxy_allowed?(session.remote_ip)
           connected(session)
           notified_connected = true
+          before_banner(session, io)
 
           # Greeting is before EHLO advertises ENHANCEDSTATUSCODES — plain 220.
           respond(io, session, reply(220, session.banner.to_s.strip, enhanced: nil))
