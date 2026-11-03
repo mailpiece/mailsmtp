@@ -214,6 +214,32 @@ class MailSmtp::LoggingTest < MailSmtp::ServerIntegrationTest
     refute_match(/\[ERROR\]/, logged)
   end
 
+  def test_logs_a_command_line_past_the_pending_input_limit_at_info
+    start_server(logger: severity_logger, pending_input_limit: 1024)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    socket.print("NOOP #{"x" * 2048}")
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+    wait_until_idle(@servers.last)
+
+    assert_match(/\[INFO\].*Input buffer overrun \(MailSmtp::ServiceUnavailable\)/, logged)
+    refute_match(/\[ERROR\]/, logged)
+  end
+
+  # A client must not write terminal escapes into the log, as Postfix's printable() keeps it from.
+  def test_logs_a_command_with_its_control_characters_replaced
+    start_server(logger: severity_logger)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    socket.print("NOOP \e[31mred\x7f\r\n")
+    read_smtp_response(socket)
+
+    assert_includes logged, "<<< NOOP ?[31mred?"
+    refute_match(/[\e\x7f]/, logged)
+  end
+
   def test_logs_a_failed_starttls_handshake_at_info
     start_server(logger: severity_logger, tls: OpensslTls.new(self_signed_context))
 

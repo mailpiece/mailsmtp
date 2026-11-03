@@ -24,13 +24,14 @@ module MailSmtp
       :connected_at, :encrypted_at, :authenticated_at,
       :authorization_id, :authentication_id, :requested_authorization_id,
       :auth_login_username,
-      :exceptions, :auth_failures, :proxy, :close_after_reply,
+      :exceptions, :auth_failures, :junk_commands, :proxy, :close_after_reply,
       :tls_version, :tls_cipher
     attr_reader :envelope
 
     def initialize
       @exceptions = 0
       @auth_failures = 0
+      @junk_commands = 0
       @proxy = nil
       @close_after_reply = false
       @tls_version = nil

@@ -55,6 +55,22 @@ class MailSmtp::DataReaderTest < MailSmtp::TestCase
     assert_instance_of MailSmtp::LineTooLong, reader.failure
   end
 
+  def test_a_bare_newline_replaces_a_recorded_line_too_long
+    lines = [ "X-Long: #{"x" * 1200}\r\n", "x\n", ".\r\n", "MAIL FROM:<ceo@example.com>\r\n" ]
+    reader = MailSmtp::DataReader.new(max_message_size: nil, max_line_length: 1000) do
+      line = lines.shift
+      raise MailSmtp::BareNewline if line == "x\n"
+
+      line
+    end
+
+    assert_raises(MailSmtp::LineTooLong) { reader.read }
+    reader.drain
+
+    assert_instance_of MailSmtp::BareNewline, reader.failure
+    assert_equal 2, lines.size, "the drain stops at the bare LF"
+  end
+
   def test_drain_uses_absolute_ceiling_when_max_message_size_is_nil
     chunk = ("z" * 1000) + "\r\n"
     # Enough lines to exceed DRAIN_BYTE_CEILING without a terminating "."

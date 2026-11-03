@@ -43,6 +43,12 @@ module MailSmtp
     MAX_SESSION_DURATION = 1800
     MAX_AUTH_FAILURES = 3
     MAX_EXCEPTIONS = 20
+    # Postfix's smtpd_junk_command_limit: NOOP, RSET, VRFY and a repeated HELO/EHLO a
+    # session may send before each further one counts as an error.
+    MAX_JUNK_COMMANDS = 100
+    JUNK_COMMANDS = /\A(?:NOOP|RSET|VRFY)\b/i
+    GREETING_COMMANDS = /\A(?:HELO|EHLO)\b/i
+    private_constant :JUNK_COMMANDS, :GREETING_COMMANDS
     # Postfix's smtpd_error_sleep_time: the pause before each error reply once a
     # session is past +error_sleep_after+ errors.
     ERROR_SLEEP_TIME = 1
@@ -51,6 +57,7 @@ module MailSmtp
     # and one protocol error ends a session, so a flood frees slots fast.
     STRESS_TIMEOUT = 10
     STRESS_MAX_EXCEPTIONS = 1
+    STRESS_MAX_JUNK_COMMANDS = 1
     # Only for the logger this class builds for itself — a supplied +logger+ brings
     # its own level.
     LOGGER_SEVERITY = Logger::INFO
@@ -76,8 +83,9 @@ module MailSmtp
     # A failed accept is classified, not counted. Running out of descriptors is the
     # usual reason a public MX cannot accept, and it clears itself as connections
     # close, so the listener backs off and waits it out instead of counting toward a
-    # stop it never comes back from.
-    ACCEPT_BACKOFF_ERRORS = [ Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM ].freeze
+    # stop it never comes back from. So does running out of threads, which drops only
+    # the client that could not get one.
+    ACCEPT_BACKOFF_ERRORS = [ Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM, ThreadError ].freeze
     # This connection died between the kernel queueing it and us taking it. Nothing
     # is wrong with the listener, so there is nothing to wait for either.
     ACCEPT_RETRY_ERRORS = [ Errno::ECONNABORTED, Errno::EPROTO, Errno::EINTR ].freeze
@@ -149,7 +157,7 @@ module MailSmtp
     # host×port pair. +max_message_size+ applies while DATA is read, not to +drain+.
     def initialize(tls:, max_connections:, max_processings:, auth:, starttls:,
       host: nil, port: nil, hosts: nil, ports: nil, listeners: nil,
-      max_connections_per_ip: nil, eight_bit_mime: false, smtputf8: false,
+      max_connections_per_ip: nil, max_processings_per_ip: nil, eight_bit_mime: false, smtputf8: false,
       pipelining: false, proxy_hosts: [], add_received: false,
       forbid_bare_newline: true, strict_path: true,
       max_message_size: MAX_MESSAGE_SIZE, max_recipients: MAX_RECIPIENTS,
@@ -159,15 +167,15 @@ module MailSmtp
       handshake_timeout: HANDSHAKE_TIMEOUT,
       max_session_duration: MAX_SESSION_DURATION,
       max_auth_failures: MAX_AUTH_FAILURES,
-      max_exceptions: MAX_EXCEPTIONS,
+      max_exceptions: MAX_EXCEPTIONS, max_junk_commands: MAX_JUNK_COMMANDS,
       error_sleep_after: nil, error_sleep_time: ERROR_SLEEP_TIME, stress_threshold: nil,
       max_messages_per_ip: nil, max_tls_sessions_per_ip: nil, max_auth_attempts_per_ip: nil,
       pending_input_limit: PENDING_INPUT_LIMIT,
       logger: nil, logger_severity: nil)
       validate_options(tls: tls, auth: auth, starttls: starttls, max_connections: max_connections,
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
-        max_recipients: max_recipients, max_auth_failures: max_auth_failures,
-        max_exceptions: max_exceptions, min_data_rate: min_data_rate,
+        max_processings_per_ip: max_processings_per_ip, max_recipients: max_recipients, max_auth_failures: max_auth_failures,
+        max_exceptions: max_exceptions, max_junk_commands: max_junk_commands, min_data_rate: min_data_rate,
         error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
         max_messages_per_ip: max_messages_per_ip,
         max_tls_sessions_per_ip: max_tls_sessions_per_ip, max_auth_attempts_per_ip: max_auth_attempts_per_ip,
@@ -180,6 +188,7 @@ module MailSmtp
       @max_connections = max_connections
       @max_connections_per_ip = max_connections_per_ip
       @max_processings = max_processings
+      @max_processings_per_ip = max_processings_per_ip
       @max_processings_wait = max_processings_wait
       @auth = auth
       @starttls = starttls
@@ -200,6 +209,7 @@ module MailSmtp
       @max_session_duration = max_session_duration
       @max_auth_failures = max_auth_failures
       @max_exceptions = max_exceptions
+      @max_junk_commands = max_junk_commands
       @error_sleep_after = error_sleep_after
       @error_sleep_time = error_sleep_time
       @stress_threshold = stress_threshold
@@ -220,7 +230,8 @@ module MailSmtp
 
       @connection_threads = []
       @connection_ips = {}
-      @processing_threads = []
+      # Each processing thread's client, for +max_processings_per_ip+.
+      @processing_threads = {}
       @admitted = 0
       @slot_mutex = Mutex.new
       @slot_released = ConditionVariable.new
@@ -327,7 +338,7 @@ module MailSmtp
     def helo(session, name)
     end
 
-    # Verify +username+/+password+, raising +AuthenticationFailed+ otherwise.
+    # Verify +username+/+password+, raising +AuthenticationFailed+ or returning false otherwise.
     # +authorization_id+ is the SASL PLAIN authzid — an unverified claim, ignored here.
     def authenticate(session, username:, password:, authorization_id: "")
       raise AuthenticationFailed
@@ -408,7 +419,7 @@ module MailSmtp
       # Order matters: it decides which error a caller sees when two options are
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
-        max_connections_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
+        max_connections_per_ip:, max_processings_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:, max_junk_commands:,
         min_data_rate:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
         max_auth_attempts_per_ip:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
@@ -423,11 +434,17 @@ module MailSmtp
         unless max_connections_per_ip.nil? || (max_connections_per_ip.is_a?(Integer) && max_connections_per_ip >= 1)
           raise ArgumentError, "max_connections_per_ip must be nil or an Integer >= 1"
         end
+        unless max_processings_per_ip.nil? || (max_processings_per_ip.is_a?(Integer) && max_processings_per_ip >= 1)
+          raise ArgumentError, "max_processings_per_ip must be nil or an Integer >= 1"
+        end
         unless max_auth_failures.nil? || (max_auth_failures.is_a?(Integer) && max_auth_failures >= 1)
           raise ArgumentError, "max_auth_failures must be nil or an Integer >= 1"
         end
         unless max_exceptions.nil? || (max_exceptions.is_a?(Integer) && max_exceptions >= 1)
           raise ArgumentError, "max_exceptions must be nil or an Integer >= 1"
+        end
+        unless max_junk_commands.nil? || (max_junk_commands.is_a?(Integer) && max_junk_commands >= 1)
+          raise ArgumentError, "max_junk_commands must be nil or an Integer >= 1"
         end
         unless min_data_rate.nil? || (min_data_rate.is_a?(Integer) && min_data_rate >= 1)
           raise ArgumentError, "min_data_rate must be nil or an Integer >= 1"
@@ -725,7 +742,7 @@ module MailSmtp
             if enforce_per_ip && ip_cap_reached?(remote_ip)
               :max_connections_per_ip
             else
-              @connection_ips[Thread.current] = remote_ip
+              @connection_ips[Thread.current] = ClientKey.of(remote_ip)
               nil
             end
           elsif max_connections && @connection_threads.size >= max_connections
@@ -734,7 +751,7 @@ module MailSmtp
             :max_connections_per_ip
           else
             @connection_threads << Thread.current
-            @connection_ips[Thread.current] = remote_ip
+            @connection_ips[Thread.current] = ClientKey.of(remote_ip)
             nil
           end
         end
@@ -742,11 +759,13 @@ module MailSmtp
         refuse_session(remote_ip, limit) if limit
       end
 
-      # Our own entry never counts against us: a re-claim is one connection
-      # being reattributed, not a second one arriving.
+      # Counted by client, an IPv6 one by its /64 (+ClientKey+). Our own entry never
+      # counts against us: a re-claim is one connection being reattributed, not a
+      # second one arriving.
       def ip_cap_reached?(remote_ip)
         if max_connections_per_ip && remote_ip
-          taken = @connection_ips.count { |thread, ip| ip == remote_ip && thread != Thread.current }
+          client = ClientKey.of(remote_ip)
+          taken = @connection_ips.count { |thread, key| key == client && thread != Thread.current }
           taken >= max_connections_per_ip
         end
       end
@@ -771,17 +790,28 @@ module MailSmtp
         end
       end
 
-      def claim_processing_slot
+      # A client past its own share is refused at once, not queued behind itself, and
+      # re-checked after each wait, as its other connections may have claimed meanwhile.
+      def claim_processing_slot(remote_ip)
+        client = ClientKey.of(remote_ip)
+
         @slot_mutex.synchronize do
           deadline = monotonic_time + @max_processings_wait
-          until processings_count < max_processings
+          loop do
+            raise TooManyProcessings, "Too many messages at once from #{remote_ip}" if processings_cap_reached?(client)
+            break if processings_count < max_processings
+
             remaining = deadline - monotonic_time
             raise ServerBusy, "Dropping connection: no processing slot free within #{@max_processings_wait}s" if remaining <= 0
 
             @slot_released.wait(@slot_mutex, remaining)
           end
-          @processing_threads << Thread.current
+          @processing_threads[Thread.current] = client
         end
+      end
+
+      def processings_cap_reached?(client)
+        @max_processings_per_ip && client && @processing_threads.count { |_thread, key| key == client } >= @max_processings_per_ip
       end
 
       def release_processing_slot
@@ -854,7 +884,7 @@ module MailSmtp
 
                 max_line = auth_line_length?(session, line) ? MAX_AUTH_LINE_LENGTH : MAX_COMMAND_LINE_LENGTH
                 raise InvalidParameters, "Command line too long" if line.bytesize + 2 > max_line
-                log(session, Logger::DEBUG, "<<< #{loggable_command(session, line)}\n")
+                log(session, Logger::DEBUG, "<<< #{printable(loggable_command(session, line))}\n")
 
                 output = process_line(session, line)
 
@@ -967,7 +997,7 @@ module MailSmtp
         end
 
         line = line.chomp("\r\n")
-        log(session, Logger::DEBUG, "<<< #{line}\n")
+        log(session, Logger::DEBUG, "<<< #{printable(line)}\n")
         process_line(session, line)
       end
 
@@ -1008,6 +1038,18 @@ module MailSmtp
           # Every command runs through here whether or not DEBUG is enabled, so
           # traffic carrying no credential skips the rewrite entirely.
           line
+        end
+      end
+
+      # Postfix's printable(): a control character logs as "?", so a client cannot write
+      # terminal escapes into the log. Valid UTF-8 keeps its printable characters.
+      def printable(line)
+        utf8 = line.dup.force_encoding(Encoding::UTF_8)
+
+        if utf8.valid_encoding?
+          utf8.gsub(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/, "?")
+        else
+          line.b.gsub(/[^\x20-\x7e]/n, "?")
         end
       end
 
@@ -1068,6 +1110,8 @@ module MailSmtp
         if proxy_allowed?(session.remote_ip) && !session.proxy && !line.match?(PROXY_LINE)
           raise ServiceUnavailable, "Dropping connection: #{session.remote_ip} must send PROXY first"
         end
+
+        count_junk_command(session) if junk_command?(session, line)
 
         case line
         when /\A(HELO|EHLO)(\s.*)?\z/i
@@ -1342,7 +1386,7 @@ module MailSmtp
 
         # Claimed before the 354: a saturated server must not invite a body it
         # cannot process yet and only find that out afterward.
-        claim_processing_slot
+        claim_processing_slot(session.remote_ip)
         session.phase = :data
         reply(354, "Start mail input; end with <CRLF>.<CRLF>", enhanced: nil)
       end
@@ -1376,11 +1420,13 @@ module MailSmtp
         idle_since = [ monotonic_time ]
         data_started = idle_since[0]
         bytes_received = [ 0 ]
+        # The DATA command's own CRLF precedes the first line.
+        after_crlf = [ true ]
         reader = DataReader.new(
           max_message_size: max_message_size,
           max_line_length: MAX_TEXT_LINE_LENGTH,
           on_headers: -> { headers_received(session) }
-        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received) }
+        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf) }
 
         reader = PrefixedReader.new(received_header(session), reader) if @add_received
 
@@ -1416,7 +1462,8 @@ module MailSmtp
           # RFC 5321 §4.5.3.1.7: after 552 for SIZE, the server may close. Same for a
           # bare LF or CR, whose sender may never write the CRLF "." we would wait for,
           # and when drain hit the absolute ceiling with no "." in sight.
-          if (error || reader.failure)&.unrecoverable? || reader.drain_ceiling_hit?
+          # An app's own error must not hide an unrecoverable one in the reader.
+          if [ error, reader.failure ].compact.any?(&:unrecoverable?) || reader.drain_ceiling_hit?
             session.close_after_reply = true
           end
         end
@@ -1427,8 +1474,8 @@ module MailSmtp
       end
 
       # Next DATA line as dot-unstuffed bytes plus CRLF, or +nil+ at the terminator, which
-      # counts only CRLF-terminated (RFC 5321 / CVE-2023-51764 smuggling): bare-LF is body.
-      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received)
+      # is only <CRLF>.<CRLF>: a dot after a bare LF is body.
+      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf)
         loop do
           raise_if_session_expired(session_deadline)
           raise_if_data_rate_too_low(data_started, bytes_received[0])
@@ -1454,15 +1501,15 @@ module MailSmtp
 
           idle_since[0] = monotonic_time
 
-          # End-of-data is only <CRLF>.<CRLF> — never a bare-LF dot.
-          return nil if line == "." && crlf
+          # As Postfix's smtpd_forbid_bare_newline = normalize: both ends of the dot need CRLF.
+          return nil if line == "." && crlf && after_crlf[0]
+
+          after_crlf[0] = crlf
 
           line.slice!(0) if line[0] == "."
           bytes_received[0] += line.bytesize + 2
           return "#{line}\r\n"
         end
-      rescue LineBuffer::BufferOverrun
-        raise ServiceUnavailable, "Input buffer overrun"
       rescue EOFError, Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED
         raise ConnectionLost, "Connection lost during DATA"
       end
@@ -1486,6 +1533,9 @@ module MailSmtp
       rescue IO::WaitWritable
         yield
         IO.select(nil, [ io.to_io ], nil, READ_WAIT_SECONDS)
+      rescue LineBuffer::BufferOverrun
+        # The client's doing, in a command or a body alike.
+        raise ServiceUnavailable, "Input buffer overrun"
       end
 
       def monotonic_time
@@ -1519,18 +1569,21 @@ module MailSmtp
         end
       end
 
+      def idle_timeout
+        stressed? ? [ @read_timeout, STRESS_TIMEOUT ].compact.min : @read_timeout
+      end
+
       def raise_if_idle_timeout(idle_since)
-        read_timeout = stressed? ? [ @read_timeout, STRESS_TIMEOUT ].compact.min : @read_timeout
-        if read_timeout && monotonic_time - idle_since > read_timeout
+        if idle_timeout && monotonic_time - idle_since > idle_timeout
           raise ServiceUnavailable, "Read timed out"
         end
       end
 
-      # Without +read_timeout+ there is no grace for the first bytes to arrive in,
-      # so the rate is not enforced either.
+      # The grace for the first bytes is the idle timeout, shortened under stress like
+      # it; without one the rate is not enforced either.
       def raise_if_data_rate_too_low(data_started, bytes_received)
-        if @min_data_rate && @read_timeout &&
-            monotonic_time > data_started + @read_timeout + bytes_received.fdiv(@min_data_rate)
+        if @min_data_rate && idle_timeout &&
+            monotonic_time > data_started + idle_timeout + bytes_received.fdiv(@min_data_rate)
           raise ServiceUnavailable, "Data rate too low"
         end
       end
@@ -1591,6 +1644,9 @@ module MailSmtp
           username: authentication_id,
           password: authentication,
           authorization_id: requested_authorization_id)
+        # A predicate's false is a refusal; nil is a hook that raises on failure.
+        raise AuthenticationFailed if granted == false
+
         # A non-empty String or Symbol is the application naming the identity —
         # authoritative, and may differ from the client's claim.
         granted = granted.to_s if granted.is_a?(String) || granted.is_a?(Symbol)
@@ -1668,6 +1724,23 @@ module MailSmtp
         if max_exceptions && session.exceptions >= max_exceptions
           observing(session) { error_limit_reached(session) }
           raise ServiceUnavailable, "Too many protocol errors"
+        end
+      end
+
+      # The first HELO/EHLO, and the one after STARTTLS, is a greeting, not junk.
+      def junk_command?(session, line)
+        line.match?(JUNK_COMMANDS) || (session.helo && line.match?(GREETING_COMMANDS))
+      end
+
+      # As Postfix does, a junk command past the limit is still answered, and counts
+      # as an error toward +max_exceptions+.
+      def count_junk_command(session)
+        session.junk_commands += 1
+        max_junk_commands = stressed? ? STRESS_MAX_JUNK_COMMANDS : @max_junk_commands
+
+        if max_junk_commands && session.junk_commands > max_junk_commands
+          session.exceptions += 1
+          raise_if_exception_caps(session, nil)
         end
       end
 

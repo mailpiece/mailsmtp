@@ -107,21 +107,31 @@ server = MyServer.new(
 server.start
 ```
 
-`tls:` takes an `OpenSSL::SSL::SSLContext`, built like any other Ruby TLS server:
+`tls:` takes any object with a `start(io)` that runs the server side of the handshake on the client's socket and returns the encrypted one. For OpenSSL, wrap an `OpenSSL::SSL::SSLContext`:
 
 ```ruby
+class Tls
+  def initialize(context)
+    @context = context
+  end
+
+  def start(io)
+    OpenSSL::SSL::SSLSocket.new(io, @context).accept
+  end
+end
+
 tls_context = OpenSSL::SSL::SSLContext.new
 tls_context.cert = OpenSSL::X509::Certificate.new(File.read("cert.pem"))
 tls_context.key = OpenSSL::PKey::RSA.new(File.read("key.pem"))
 
-server = MyServer.new(host: "127.0.0.1", port: 2525, tls: tls_context,
+server = MyServer.new(host: "127.0.0.1", port: 2525, tls: Tls.new(tls_context),
   auth: :disabled, starttls: :optional, max_connections: 100, max_processings: 4)
 ```
 
 You can hot-swap the STARTTLS certificate without restarting — e.g. after a renewal replaces `cert.pem`/`key.pem`:
 
 ```ruby
-server.tls = new_tls_context
+server.tls = Tls.new(new_tls_context)
 ```
 
 For multi-listen, `hosts:` / `ports:` expand to every host×port pair.
@@ -190,7 +200,7 @@ end
 | `disconnected`      | `(session)`                                          | —                                                                                                                                                                                                             |
 | `helo`              | `(session, name)`                                    | after STARTTLS, `session.tls_version` / `session.tls_cipher` are set                                                                                                                                          |
 | `proxy`             | `(session, proxy_data)`                              | hash replaces PROXY data; runs before `connected`                                                                                                                                                             |
-| `authenticate`      | `(session, username:, password:, authorization_id:)` | returned String grants that `authorization_id`, else the username is used; raise `AuthenticationFailed`                                                                                                       |
+| `authenticate`      | `(session, username:, password:, authorization_id:)` | returned String grants that `authorization_id`, else the username is used; raise `AuthenticationFailed` or return `false` to refuse                                                                                                     |
 | `auth_mechanisms`   | `(session)`                                          |                                                                                                                                                                                                               |
 | `mail_from`         | `(session, address)`                                 | address is the mailbox out of the reverse-path as a UTF-8 String (`""` for `<>`, see `envelope.null_sender?`), with any `AUTH=` claim on `envelope.auth_identity`; returned string is stored as envelope from |
 | `rcpt_to`           | `(session, address)`                                 | address is the mailbox out of the forward-path, a UTF-8 String; returned string is appended to envelope to                                                                                                    |
@@ -252,6 +262,7 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 | `ServerBusy`                     | 421    | 4.3.2    | (as `ServiceUnavailable`) — no connection or processing slot free |               |
 | `LocalError`                     | 451    | 4.3.0    | Requested action aborted: local error in processing               |               |
 | `RateLimited`                    | 450    | 4.7.1    | Requested mail action not taken: too many messages from your address |            |
+| `TooManyProcessings`             | 451    | 4.7.0    | Requested action aborted: too many messages at once               |               |
 | `TooManyRecipients`              | 452    | 4.5.3    | Requested action not taken: too many recipients                   |               |
 | `TlsUnavailable`                 | 454    | 4.7.0    | TLS not available due to temporary reason                         |               |
 | `AuthenticationTemporarilyUnavailable` | 454 | 4.7.0  | Temporary authentication failure                                  |               |
@@ -311,7 +322,7 @@ The three `auth_*` phases are also where the engine widens the line-length limit
 | `connected_at` / `encrypted_at` / `authenticated_at`                    | UTC `Time` when each happened, or `nil`                                                                                    |
 | `authenticated?` / `encrypted?`                                         | `true` once the matching `_at` above is set                                                                                |
 | `authorization_id` / `authentication_id` / `requested_authorization_id` | identities from a granted or attempted AUTH (see `authenticate`'s row above)                                               |
-| `exceptions` / `auth_failures`                                          | counters toward `max_exceptions` / `max_auth_failures`                                                                     |
+| `exceptions` / `auth_failures` / `junk_commands`                        | counters toward `max_exceptions` / `max_auth_failures` / `max_junk_commands`                                               |
 | `proxy`                                                                 | the (possibly hook-replaced) PROXY v1 data hash, or `nil` when PROXY is off or unsent                                      |
 | `close_after_reply`                                                     | when `true`, the session ends after the reply currently being sent                                                         |
 | `tls_version` / `tls_cipher`                                            | set once STARTTLS's handshake completes                                                                                    |
@@ -354,11 +365,13 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `max_message_size`       | `10485760` (10 MiB) | Advertises SIZE and enforces as DATA arrives; `nil` disables                                                                                                                            |
 | `max_recipients`         | `100`               | Minimum 100 (RFC 5321); enforced at RCPT TO                                                                                                                                             |
 | `max_connections`        | required arg        | Concurrent connections; refused with a 421 in the acceptor, before a thread is spawned                                                                                                  |
-| `max_connections_per_ip` | `nil`               | Per-IP concurrent connections; `nil` disables. Enforced once the peer is known, so after a PROXY line                                                                                   |
+| `max_connections_per_ip` | `nil`               | Per-IP concurrent connections, an IPv6 client counted by its /64; `nil` disables. Enforced once the peer is known, so after a PROXY line                                                 |
 | `max_processings`        | required arg        | Concurrent DATA transfers; idle sessions do not consume a slot                                                                                                                          |
 | `max_processings_wait`   | `30`                | Seconds to wait for a DATA processing slot before 421                                                                                                                                   |
+| `max_processings_per_ip` | `nil`              | Concurrent DATA transfers from one client, an IPv6 client counted by its /64; past it, DATA gets a 451 (`TooManyProcessings`) at once instead of waiting. `nil` disables                 |
 | `max_auth_failures`      | `3`                 | Failed AUTH attempts before 421; `nil` disables                                                                                                                                         |
 | `max_exceptions`         | `20`                | Protocol errors before 421; `nil` disables                                                                                                                                              |
+| `max_junk_commands`      | `100`               | NOOP, RSET, VRFY and repeated HELO/EHLO per session (Postfix `smtpd_junk_command_limit`); past it, each is still answered but counts toward `max_exceptions`. `nil` disables           |
 | `error_sleep_after`      | `nil`               | Errors a session may make before each further error reply is delayed by `error_sleep_time` (Postfix `smtpd_soft_error_limit`); `nil` disables                                           |
 | `error_sleep_time`       | `1`                 | Seconds an error reply waits once the session is past `error_sleep_after` (Postfix `smtpd_error_sleep_time`)                                                                           |
 | `stress_threshold`       | `nil`               | Share of `max_connections` (a Float above 0, at most 1) at which the server is stressed: 10 s idle and handshake timeouts, one protocol error per session. `nil` disables               |
@@ -385,7 +398,7 @@ A forced `#stop` raises `MailSmtp::Server::StopConnection` into any connection s
 
 #### Stress
 
-With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller) and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
+With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout, the DATA rate's grace and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller), one junk command is free, and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, a `max_junk_commands: nil` the one free junk command, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
 
 #### Error tarpit
 

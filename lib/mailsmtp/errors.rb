@@ -24,6 +24,11 @@ module MailSmtp
     status 451, "Requested action aborted: local error in processing", enhanced: "4.3.0"
   end
 
+  # 451 — this address already has max_processings_per_ip messages being read
+  class TooManyProcessings < Error
+    status 451, "Requested action aborted: too many messages at once", enhanced: "4.7.0"
+  end
+
   # 452 — envelope has more recipients than we allow in one transaction
   class TooManyRecipients < Error
     status 452, "Requested action not taken: too many recipients", enhanced: "4.5.3"

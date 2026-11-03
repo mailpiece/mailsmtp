@@ -7,6 +7,16 @@
 - Changed: with `proxy_hosts` set, a client may no longer pipeline behind its first command unless `pipelining` is on
 - Added hooks to observe refused connections, the error tarpit and every reply
 - Changed: refused commands, timeouts and a client's failed TLS now log at INFO, and the server out of capacity at WARN (`ServerBusy`), leaving ERROR for hook and server faults
+- Fixed: a `.` after a bare LF no longer ends DATA, and a bare LF behind a long line or an error from `receive` closes the connection
+- Fixed: under stress, `min_data_rate`'s grace drops to 10 seconds with the idle timeout
+- Fixed: a connection thread that cannot be started no longer stops the listener; it backs off as it does when out of descriptors
+- Fixed: a command line past `pending_input_limit` gets a 421 logged at INFO, not an ERROR
+- Fixed: `false` from `authenticate` refuses the login with a 535 instead of authenticating
+- Changed: a control character or DEL in a MAIL FROM or RCPT TO mailbox is refused with a 501
+- Changed: a client's command logs at DEBUG with control characters as `?`, as Postfix's `printable()`
+- Changed: `max_connections_per_ip` counts an IPv6 client by its /64 and `::ffff:a.b.c.d` as `a.b.c.d`, as the per-IP rates do
+- Added `max_processings_per_ip` (`nil` disables): past it, DATA gets a 451 (`TooManyProcessings`) instead of waiting for a slot
+- Added `max_junk_commands` (default 100, Postfix's `smtpd_junk_command_limit`, 1 under stress): past it, each NOOP, RSET, VRFY or repeated HELO/EHLO counts toward `max_exceptions`
 
 ## 0.7.0
 

@@ -354,6 +354,15 @@ class MailSmtp::AuthTest < MailSmtp::ServerIntegrationTest
     assert_equal "user", server.granted_authorization_id
   end
 
+  # A hook written as a predicate, `username == "user" && password == "secret"`,
+  # answers false for a wrong password, and that must not log the client in.
+  def test_an_explicit_false_return_refuses_the_login
+    server = authzid_server { |_authzid| false }
+    start(server)
+
+    assert_match(/\A535 /, authenticate_with_authzid(port, ""))
+  end
+
   # RFC 4616 §2 allows an authzid equal to the authcid; a canonicalizing answer
   # must not be compared byte-for-byte against it.
   def test_accepts_authzid_equal_to_the_account_when_the_application_canonicalizes
