@@ -4,5 +4,4 @@ pkg/*
 .DS_Store
 tmp
 /doc/
-Gemfile.lock
 .ruby-lsp/
