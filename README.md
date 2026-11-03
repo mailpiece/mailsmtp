@@ -186,9 +186,10 @@ end
 | Hook                | Signature                                            | Return / raise                                                                                                                                                                                                |
 | ------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `connected`         | `(session)`                                          | —                                                                                                                                                                                                             |
+| `before_banner`     | `(session, io)`                                      | once, after `connected`, before the `220`; peek at `io`, don't read it ([Before the banner](#before-the-banner))                                                                                              |
 | `disconnected`      | `(session)`                                          | —                                                                                                                                                                                                             |
 | `helo`              | `(session, name)`                                    | after STARTTLS, `session.tls_version` / `session.tls_cipher` are set                                                                                                                                          |
-| `proxy`             | `(session, proxy_data)`                              | hash replaces PROXY data                                                                                                                                                                                      |
+| `proxy`             | `(session, proxy_data)`                              | hash replaces PROXY data; runs before `connected`                                                                                                                                                             |
 | `authenticate`      | `(session, username:, password:, authorization_id:)` | returned String grants that `authorization_id`, else the username is used; raise `AuthenticationFailed`                                                                                                       |
 | `auth_mechanisms`   | `(session)`                                          |                                                                                                                                                                                                               |
 | `mail_from`         | `(session, address)`                                 | address is the mailbox out of the reverse-path as a UTF-8 String (`""` for `<>`, see `envelope.null_sender?`), with any `AUTH=` claim on `envelope.auth_identity`; returned string is stored as envelope from |
@@ -201,6 +202,27 @@ end
 | `process_line`      | `(session, line)`                                    | override for policy; call `super` for dispatch — dispatches on `session.phase` ([Session and Envelope](#session-and-envelope))                                                                                |
 | `unknown_command`   | `(session, line)`                                    | default raises `CommandNotRecognized`                                                                                                                                                                         |
 | `log`               | `(session, severity, msg, err:)`                     | —                                                                                                                                                                                                             |
+
+#### Before the banner
+
+A connection opens in this order: the PROXY header, when the peer is in `proxy_hosts` (the `proxy` hook runs as it is read); then `connected`; then `before_banner`; then the `220` banner. Both hooks see `session.remote_ip` as the client the proxy names, and either may set `session.banner`.
+
+`before_banner` is where a check on the client's first moments goes, such as refusing one that talks before the banner (Postfix's pregreet test). `io` is the plain socket, before any STARTTLS, and the engine has read nothing from it but the PROXY header, which it reads a byte at a time so that whatever the client sent behind it is still there. Wait on it (`IO.select`) and peek at it (`recv_nonblock(n, Socket::MSG_PEEK)`), but don't read from it if the session is to go on: bytes taken off the socket never reach the engine. The engine puts no timeout around the hook, so bound your own wait.
+
+Raise a `ServiceUnavailable`, or a subclass declaring its own status, to send that reply and close the connection, as from `connected`; any other error is answered with a plain 421. `disconnected` still runs. Closing a socket with unread input makes the kernel send a TCP reset, which can reach the client ahead of the reply and lose it, so read off what the client sent before raising:
+
+```ruby
+class EarlyTalker < MailSmtp::ServiceUnavailable
+  status 554, "Protocol error: talking before the greeting", enhanced: "5.7.1"
+end
+
+def before_banner(session, io)
+  if IO.select([ io ], nil, nil, 6)
+    # Read it off, or the close resets the connection before the 554 arrives.
+    raise EarlyTalker if io.read_nonblock(4096, exception: false).is_a?(String)
+  end
+end
+```
 
 
 
@@ -268,7 +290,7 @@ The three `auth_*` phases are also where the engine widens the line-length limit
 | Accessor                                                                | Notes                                                                                                                      |
 | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `phase`                                                                 | current phase symbol — see above                                                                                           |
-| `local_ip` / `remote_ip`                                                | connection endpoints; `remote_ip` is overwritten by a valid PROXY line                                                     |
+| `local_ip` / `remote_ip`                                                | connection endpoints; `remote_ip` is overwritten by a valid PROXY line, before `connected` runs                            |
 | `helo`                                                                  | the HELO/EHLO name the client gave (unsafe characters neutered to `?`); `nil` before HELO                                  |
 | `banner`                                                                | the `220` greeting text; settable from `connected` (README example), defaults to `"#{local_ip} ESMTP"`                     |
 | `greeting`                                                              | server name echoed in the EHLO response and used in the Received header; settable from `connected`, defaults to `local_ip` |
@@ -311,7 +333,7 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `eight_bit_mime`         | `false`             | RFC 6152; what the client declared on a given message lands on `session.envelope.body_encoding`                                                                                         |
 | `smtputf8`               | `false`             | RFC 6531; requires `eight_bit_mime`. When off, non-ASCII envelope addresses are refused; when on, invalid UTF-8 ones are. What the client declared lands on `session.envelope.smtputf8` |
 | `pipelining`             | `false`             | RFC 2920; STARTTLS always drops plaintext buffers                                                                                                                                       |
-| `proxy_hosts`            | `[]`                | PROXY v1 from these IPs/CIDRs                                                                                                                                                           |
+| `proxy_hosts`            | `[]`                | PROXY v1 from these IPs/CIDRs, which must send it first: they get no banner until it arrives                                                                                            |
 | `add_received`           | `false`             | Prefix `received_header` onto the DATA reader                                                                                                                                           |
 | `forbid_bare_newline`    | `true`              | Reject DATA lines carrying a bare LF or a bare CR (SMTP smuggling)                                                                                                                      |
 | `strict_path`            | `true`              | Require angle brackets on the envelope path; `false` also takes a bare path, ending it at the first space                                                                               |

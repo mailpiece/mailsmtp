@@ -259,6 +259,50 @@ module MailSmtp
       end
     end
 
+    class ConnectedRecordingServer < ReceivingServer
+      attr_reader :connected_remote_ip
+
+      def connected(session)
+        @connected_remote_ip = session.remote_ip
+      end
+    end
+
+    class EarlyTalker < MailSmtp::ServiceUnavailable
+      status 554, "Protocol error: talking before the greeting", enhanced: "5.7.1"
+    end
+
+    # A pregreet check: waits briefly for the client, peeks at anything it sent, and
+    # with +refuse+ reads it off and raises, so the close sends the 554 rather than a reset.
+    class BeforeBannerServer < ReceivingServer
+      attr_reader :calls, :remote_ip, :peeked
+
+      def initialize(wait: 0.5, refuse: nil, **)
+        super(**)
+        @wait = wait
+        @refuse = refuse
+        @calls = []
+      end
+
+      def connected(_session)
+        @calls << :connected
+      end
+
+      def before_banner(session, io)
+        @calls << :before_banner
+        @remote_ip = session.remote_ip
+        session.banner = "before-banner ESMTP"
+
+        if IO.select([ io ], nil, nil, @wait)
+          @peeked = io.recv_nonblock(64, Socket::MSG_PEEK, exception: false)
+
+          if @refuse
+            io.read_nonblock(4096, exception: false)
+            raise @refuse
+          end
+        end
+      end
+    end
+
     # Slow enough that a forced stop always lands mid-command, and counts the
     # calls so a test can tell whether the pipeline behind it also ran.
     class SlowCommandServer < ReceivingServer
