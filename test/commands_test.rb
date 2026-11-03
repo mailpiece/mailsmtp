@@ -1,6 +1,60 @@
 require_relative "test_helper"
 
 class MailSmtp::CommandsTest < MailSmtp::ServerIntegrationTest
+  # Postfix's smtpd_junk_command_limit: past it, each NOOP, RSET, VRFY or repeated
+  # HELO/EHLO is answered but counts as an error toward max_exceptions.
+  def test_junk_commands_past_the_limit_count_as_errors
+    start_server(max_junk_commands: 2, max_exceptions: 2)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    socket.print("EHLO test.client.example\r\n")
+    read_smtp_lines(socket)
+    socket.print("NOOP\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("EHLO test.client.example\r\n")
+    read_smtp_lines(socket)
+    socket.print("RSET\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("VRFY someone\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_a_hundred_junk_commands_are_free_by_default
+    start_server(max_exceptions: 1, pipelining: true)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    socket.print("NOOP\r\n" * 100)
+    replies = Array.new(100) { read_smtp_response(socket).to_s[0, 3] }
+    assert_equal [ "250" ], replies.uniq
+    socket.print("NOOP\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_a_stressed_server_allows_one_junk_command
+    server = start_server(max_connections: 2, stress_threshold: 0.8)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    read_smtp_response(connect(port))
+    assert_predicate server, :stressed?
+
+    socket.print("NOOP\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("NOOP\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_rejects_a_max_junk_commands_below_one
+    error = assert_raises(ArgumentError) { MailSmtp::Server.new(**server_options(max_junk_commands: 0)) }
+
+    assert_match(/max_junk_commands must be nil or an Integer >= 1/, error.message)
+  end
+
   def test_ehlo_requires_an_argument
     start_server
 

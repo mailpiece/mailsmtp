@@ -322,7 +322,7 @@ The three `auth_*` phases are also where the engine widens the line-length limit
 | `connected_at` / `encrypted_at` / `authenticated_at`                    | UTC `Time` when each happened, or `nil`                                                                                    |
 | `authenticated?` / `encrypted?`                                         | `true` once the matching `_at` above is set                                                                                |
 | `authorization_id` / `authentication_id` / `requested_authorization_id` | identities from a granted or attempted AUTH (see `authenticate`'s row above)                                               |
-| `exceptions` / `auth_failures`                                          | counters toward `max_exceptions` / `max_auth_failures`                                                                     |
+| `exceptions` / `auth_failures` / `junk_commands`                        | counters toward `max_exceptions` / `max_auth_failures` / `max_junk_commands`                                               |
 | `proxy`                                                                 | the (possibly hook-replaced) PROXY v1 data hash, or `nil` when PROXY is off or unsent                                      |
 | `close_after_reply`                                                     | when `true`, the session ends after the reply currently being sent                                                         |
 | `tls_version` / `tls_cipher`                                            | set once STARTTLS's handshake completes                                                                                    |
@@ -371,6 +371,7 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `max_processings_per_ip` | `nil`              | Concurrent DATA transfers from one client, an IPv6 client counted by its /64; past it, DATA gets a 451 (`TooManyProcessings`) at once instead of waiting. `nil` disables                 |
 | `max_auth_failures`      | `3`                 | Failed AUTH attempts before 421; `nil` disables                                                                                                                                         |
 | `max_exceptions`         | `20`                | Protocol errors before 421; `nil` disables                                                                                                                                              |
+| `max_junk_commands`      | `100`               | NOOP, RSET, VRFY and repeated HELO/EHLO per session (Postfix `smtpd_junk_command_limit`); past it, each is still answered but counts toward `max_exceptions`. `nil` disables           |
 | `error_sleep_after`      | `nil`               | Errors a session may make before each further error reply is delayed by `error_sleep_time` (Postfix `smtpd_soft_error_limit`); `nil` disables                                           |
 | `error_sleep_time`       | `1`                 | Seconds an error reply waits once the session is past `error_sleep_after` (Postfix `smtpd_error_sleep_time`)                                                                           |
 | `stress_threshold`       | `nil`               | Share of `max_connections` (a Float above 0, at most 1) at which the server is stressed: 10 s idle and handshake timeouts, one protocol error per session. `nil` disables               |
@@ -397,7 +398,7 @@ A forced `#stop` raises `MailSmtp::Server::StopConnection` into any connection s
 
 #### Stress
 
-With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout, the DATA rate's grace and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller) and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
+With `stress_threshold` set, say 0.8, the server is stressed once admitted connections reach that share of `max_connections` (Postfix's `STRESS_README`): the idle read timeout, the DATA rate's grace and the STARTTLS handshake timeout drop to 10 seconds (or the configured value, if smaller), one junk command is free, and one protocol error ends a session, so a flood frees slots fast. A `read_timeout: nil` still gets the 10 second idle timeout under stress, a `max_junk_commands: nil` the one free junk command, and a `max_exceptions: nil` the one-error budget. It lifts on its own once admissions fall below the mark. `stressed?` is public so an application can tighten its own limits alongside. Off by default.
 
 #### Error tarpit
 

@@ -43,6 +43,12 @@ module MailSmtp
     MAX_SESSION_DURATION = 1800
     MAX_AUTH_FAILURES = 3
     MAX_EXCEPTIONS = 20
+    # Postfix's smtpd_junk_command_limit: NOOP, RSET, VRFY and a repeated HELO/EHLO a
+    # session may send before each further one counts as an error.
+    MAX_JUNK_COMMANDS = 100
+    JUNK_COMMANDS = /\A(?:NOOP|RSET|VRFY)\b/i
+    GREETING_COMMANDS = /\A(?:HELO|EHLO)\b/i
+    private_constant :JUNK_COMMANDS, :GREETING_COMMANDS
     # Postfix's smtpd_error_sleep_time: the pause before each error reply once a
     # session is past +error_sleep_after+ errors.
     ERROR_SLEEP_TIME = 1
@@ -51,6 +57,7 @@ module MailSmtp
     # and one protocol error ends a session, so a flood frees slots fast.
     STRESS_TIMEOUT = 10
     STRESS_MAX_EXCEPTIONS = 1
+    STRESS_MAX_JUNK_COMMANDS = 1
     # Only for the logger this class builds for itself — a supplied +logger+ brings
     # its own level.
     LOGGER_SEVERITY = Logger::INFO
@@ -160,7 +167,7 @@ module MailSmtp
       handshake_timeout: HANDSHAKE_TIMEOUT,
       max_session_duration: MAX_SESSION_DURATION,
       max_auth_failures: MAX_AUTH_FAILURES,
-      max_exceptions: MAX_EXCEPTIONS,
+      max_exceptions: MAX_EXCEPTIONS, max_junk_commands: MAX_JUNK_COMMANDS,
       error_sleep_after: nil, error_sleep_time: ERROR_SLEEP_TIME, stress_threshold: nil,
       max_messages_per_ip: nil, max_tls_sessions_per_ip: nil, max_auth_attempts_per_ip: nil,
       pending_input_limit: PENDING_INPUT_LIMIT,
@@ -168,7 +175,7 @@ module MailSmtp
       validate_options(tls: tls, auth: auth, starttls: starttls, max_connections: max_connections,
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
         max_processings_per_ip: max_processings_per_ip, max_recipients: max_recipients, max_auth_failures: max_auth_failures,
-        max_exceptions: max_exceptions, min_data_rate: min_data_rate,
+        max_exceptions: max_exceptions, max_junk_commands: max_junk_commands, min_data_rate: min_data_rate,
         error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
         max_messages_per_ip: max_messages_per_ip,
         max_tls_sessions_per_ip: max_tls_sessions_per_ip, max_auth_attempts_per_ip: max_auth_attempts_per_ip,
@@ -202,6 +209,7 @@ module MailSmtp
       @max_session_duration = max_session_duration
       @max_auth_failures = max_auth_failures
       @max_exceptions = max_exceptions
+      @max_junk_commands = max_junk_commands
       @error_sleep_after = error_sleep_after
       @error_sleep_time = error_sleep_time
       @stress_threshold = stress_threshold
@@ -411,7 +419,7 @@ module MailSmtp
       # Order matters: it decides which error a caller sees when two options are
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
-        max_connections_per_ip:, max_processings_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
+        max_connections_per_ip:, max_processings_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:, max_junk_commands:,
         min_data_rate:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
         max_auth_attempts_per_ip:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
@@ -434,6 +442,9 @@ module MailSmtp
         end
         unless max_exceptions.nil? || (max_exceptions.is_a?(Integer) && max_exceptions >= 1)
           raise ArgumentError, "max_exceptions must be nil or an Integer >= 1"
+        end
+        unless max_junk_commands.nil? || (max_junk_commands.is_a?(Integer) && max_junk_commands >= 1)
+          raise ArgumentError, "max_junk_commands must be nil or an Integer >= 1"
         end
         unless min_data_rate.nil? || (min_data_rate.is_a?(Integer) && min_data_rate >= 1)
           raise ArgumentError, "min_data_rate must be nil or an Integer >= 1"
@@ -1100,6 +1111,8 @@ module MailSmtp
           raise ServiceUnavailable, "Dropping connection: #{session.remote_ip} must send PROXY first"
         end
 
+        count_junk_command(session) if junk_command?(session, line)
+
         case line
         when /\A(HELO|EHLO)(\s.*)?\z/i
             process_helo(session, line)
@@ -1711,6 +1724,23 @@ module MailSmtp
         if max_exceptions && session.exceptions >= max_exceptions
           observing(session) { error_limit_reached(session) }
           raise ServiceUnavailable, "Too many protocol errors"
+        end
+      end
+
+      # The first HELO/EHLO, and the one after STARTTLS, is a greeting, not junk.
+      def junk_command?(session, line)
+        line.match?(JUNK_COMMANDS) || (session.helo && line.match?(GREETING_COMMANDS))
+      end
+
+      # As Postfix does, a junk command past the limit is still answered, and counts
+      # as an error toward +max_exceptions+.
+      def count_junk_command(session)
+        session.junk_commands += 1
+        max_junk_commands = stressed? ? STRESS_MAX_JUNK_COMMANDS : @max_junk_commands
+
+        if max_junk_commands && session.junk_commands > max_junk_commands
+          session.exceptions += 1
+          raise_if_exception_caps(session, nil)
         end
       end
 
