@@ -148,7 +148,9 @@ module MailSmtp
       rescue ServiceUnavailable
         raise
       rescue Error => e
-        @failure ||= e
+        # A bare LF behind a long line must still stop the drain, which a recoverable
+        # failure recorded first would otherwise hide.
+        @failure = e if @failure.nil? || (e.unrecoverable? && !@failure.unrecoverable?)
       end
   end
 

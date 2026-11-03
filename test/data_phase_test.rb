@@ -229,6 +229,58 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_includes server.received[:data], "Subject: FORGED"
   end
 
+  def test_a_dot_after_a_bare_lf_does_not_end_data_when_bare_lf_is_allowed
+    server = ReceivingServer.new(**server_options(forbid_bare_newline: false, pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: innocent\r\n\r\nhi\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal 1, server.receive_count
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+    assert_includes server.received[:data], "Subject: FORGED"
+  end
+
+  # A long line is a failure the drain resynchronizes from, and it must not let the
+  # bare LF behind it be forgotten: that would end DATA at the <LF>.<CRLF>.
+  def test_a_bare_lf_behind_a_long_line_closes_the_connection
+    server = ReceivingServer.new(**server_options(pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    assert_nil gets_or_nil(socket)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+  end
+
+  def test_a_bare_lf_behind_a_long_line_closes_the_connection_without_pipelining
+    server = ReceivingServer.new(**server_options)
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\nx\n.\r\n")
+    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    socket.print("MAIL FROM:<ceo@victim.example>\r\n")
+
+    assert_nil gets_or_nil(socket)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+  end
+
+  def test_a_receive_that_wraps_a_bare_lf_in_its_own_error_still_closes_the_connection
+    server = WrappingServer.new(**server_options(pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A451 /, read_smtp_response(socket).to_s)
+    assert_nil gets_or_nil(socket)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+  end
+
   def test_forbid_bare_newline_rejects_data_with_bare_lf
     # Default is strict (true) — omit the option so the constructor default is covered.
     start_server
@@ -410,7 +462,25 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
   end
 
+  SMUGGLED_TRANSACTION = "MAIL FROM:<ceo@victim.example>\r\nRCPT TO:<everyone@victim.example>\r\n" \
+    "DATA\r\nSubject: FORGED\r\n\r\nwire the money\r\n.\r\n"
+
+  # Storage code that turns every failure into its own.
+  class WrappingServer < ReceivingServer
+    def receive(_session, io)
+      io.read
+    rescue StandardError
+      raise "storage failed"
+    end
+  end
+
   private
+    def gets_or_nil(socket)
+      socket.gets
+    rescue Errno::ECONNRESET
+      nil
+    end
+
     # Writes one short body line every 0.1s until the server replies or +seconds+
     # pass, returning the reply or nil.
     def drip_body_lines(socket, seconds:)

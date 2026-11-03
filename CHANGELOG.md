@@ -7,6 +7,7 @@
 - Changed: with `proxy_hosts` set, a client may no longer pipeline behind its first command unless `pipelining` is on
 - Added hooks to observe refused connections, the error tarpit and every reply
 - Changed: refused commands, timeouts and a client's failed TLS now log at INFO, and the server out of capacity at WARN (`ServerBusy`), leaving ERROR for hook and server faults
+- Fixed: a `.` after a bare LF no longer ends DATA, and a bare LF behind a long line or an error from `receive` closes the connection
 
 ## 0.7.0
 

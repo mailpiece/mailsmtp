@@ -1376,11 +1376,13 @@ module MailSmtp
         idle_since = [ monotonic_time ]
         data_started = idle_since[0]
         bytes_received = [ 0 ]
+        # The DATA command's own CRLF precedes the first line.
+        after_crlf = [ true ]
         reader = DataReader.new(
           max_message_size: max_message_size,
           max_line_length: MAX_TEXT_LINE_LENGTH,
           on_headers: -> { headers_received(session) }
-        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received) }
+        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf) }
 
         reader = PrefixedReader.new(received_header(session), reader) if @add_received
 
@@ -1416,7 +1418,8 @@ module MailSmtp
           # RFC 5321 §4.5.3.1.7: after 552 for SIZE, the server may close. Same for a
           # bare LF or CR, whose sender may never write the CRLF "." we would wait for,
           # and when drain hit the absolute ceiling with no "." in sight.
-          if (error || reader.failure)&.unrecoverable? || reader.drain_ceiling_hit?
+          # An app's own error must not hide an unrecoverable one in the reader.
+          if [ error, reader.failure ].compact.any?(&:unrecoverable?) || reader.drain_ceiling_hit?
             session.close_after_reply = true
           end
         end
@@ -1427,8 +1430,8 @@ module MailSmtp
       end
 
       # Next DATA line as dot-unstuffed bytes plus CRLF, or +nil+ at the terminator, which
-      # counts only CRLF-terminated (RFC 5321 / CVE-2023-51764 smuggling): bare-LF is body.
-      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received)
+      # is only <CRLF>.<CRLF>: a dot after a bare LF is body.
+      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf)
         loop do
           raise_if_session_expired(session_deadline)
           raise_if_data_rate_too_low(data_started, bytes_received[0])
@@ -1454,8 +1457,10 @@ module MailSmtp
 
           idle_since[0] = monotonic_time
 
-          # End-of-data is only <CRLF>.<CRLF> — never a bare-LF dot.
-          return nil if line == "." && crlf
+          # As Postfix's smtpd_forbid_bare_newline = normalize: both ends of the dot need CRLF.
+          return nil if line == "." && crlf && after_crlf[0]
+
+          after_crlf[0] = crlf
 
           line.slice!(0) if line[0] == "."
           bytes_received[0] += line.bytesize + 2
