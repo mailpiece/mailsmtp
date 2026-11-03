@@ -855,7 +855,7 @@ module MailSmtp
 
                 max_line = auth_line_length?(session, line) ? MAX_AUTH_LINE_LENGTH : MAX_COMMAND_LINE_LENGTH
                 raise InvalidParameters, "Command line too long" if line.bytesize + 2 > max_line
-                log(session, Logger::DEBUG, "<<< #{loggable_command(session, line)}\n")
+                log(session, Logger::DEBUG, "<<< #{printable(loggable_command(session, line))}\n")
 
                 output = process_line(session, line)
 
@@ -968,7 +968,7 @@ module MailSmtp
         end
 
         line = line.chomp("\r\n")
-        log(session, Logger::DEBUG, "<<< #{line}\n")
+        log(session, Logger::DEBUG, "<<< #{printable(line)}\n")
         process_line(session, line)
       end
 
@@ -1009,6 +1009,18 @@ module MailSmtp
           # Every command runs through here whether or not DEBUG is enabled, so
           # traffic carrying no credential skips the rewrite entirely.
           line
+        end
+      end
+
+      # Postfix's printable(): a control character logs as "?", so a client cannot write
+      # terminal escapes into the log. Valid UTF-8 keeps its printable characters.
+      def printable(line)
+        utf8 = line.dup.force_encoding(Encoding::UTF_8)
+
+        if utf8.valid_encoding?
+          utf8.gsub(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/, "?")
+        else
+          line.b.gsub(/[^\x20-\x7e]/n, "?")
         end
       end
 
