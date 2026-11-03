@@ -65,6 +65,34 @@ class MailSmtp::ConnectionsTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A421 /, read_smtp_response(challenger).to_s)
   end
 
+  # One client holding every processing slot would block all mail, so past its share
+  # it is refused at once rather than queued behind itself.
+  def test_refuses_data_past_max_processings_per_ip_by_client
+    start_server(max_processings_per_ip: 1, max_processings_wait: 5, proxy_hosts: [ "127.0.0.1" ])
+
+    holder = envelope_via_proxy("TCP6 2001:db8::1 ::1")
+    holder.print("DATA\r\n")
+    assert_match(/\A354 /, read_smtp_response(holder).to_s)
+
+    challenger = envelope_via_proxy("TCP6 2001:db8::2 ::1")
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    challenger.print("DATA\r\n")
+    assert_match(/\A451 4.7.0 /, read_smtp_response(challenger).to_s)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1
+    challenger.print("RSET\r\n")
+    assert_match(/\A250 /, read_smtp_response(challenger).to_s)
+
+    other = envelope_via_proxy("TCP4 192.0.2.7 127.0.0.1")
+    other.print("DATA\r\n")
+    assert_match(/\A354 /, read_smtp_response(other).to_s)
+  end
+
+  def test_rejects_a_max_processings_per_ip_below_one
+    error = assert_raises(ArgumentError) { MailSmtp::Server.new(**server_options(max_processings_per_ip: 0)) }
+
+    assert_match(/max_processings_per_ip must be nil or an Integer >= 1/, error.message)
+  end
+
   def test_closes_a_session_that_exceeds_max_session_duration
     start_server(max_session_duration: 0.3, read_timeout: 30)
 
@@ -246,4 +274,18 @@ class MailSmtp::ConnectionsTest < MailSmtp::ServerIntegrationTest
 
     assert server.stopped?, "an unrecoverable accept error must not be retried"
   end
+
+  private
+    def envelope_via_proxy(endpoints)
+      socket = connect(port)
+      socket.print("PROXY #{endpoints} 40000 #{port}\r\n")
+      assert_match(/\A220 /, read_smtp_response(socket).to_s)
+      socket.print("EHLO client.example\r\n")
+      read_smtp_lines(socket)
+      socket.print("MAIL FROM:<a@example.com>\r\n")
+      assert_match(/\A250 /, read_smtp_response(socket).to_s)
+      socket.print("RCPT TO:<b@example.com>\r\n")
+      assert_match(/\A250 /, read_smtp_response(socket).to_s)
+      socket
+    end
 end

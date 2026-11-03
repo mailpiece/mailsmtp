@@ -150,7 +150,7 @@ module MailSmtp
     # host×port pair. +max_message_size+ applies while DATA is read, not to +drain+.
     def initialize(tls:, max_connections:, max_processings:, auth:, starttls:,
       host: nil, port: nil, hosts: nil, ports: nil, listeners: nil,
-      max_connections_per_ip: nil, eight_bit_mime: false, smtputf8: false,
+      max_connections_per_ip: nil, max_processings_per_ip: nil, eight_bit_mime: false, smtputf8: false,
       pipelining: false, proxy_hosts: [], add_received: false,
       forbid_bare_newline: true, strict_path: true,
       max_message_size: MAX_MESSAGE_SIZE, max_recipients: MAX_RECIPIENTS,
@@ -167,7 +167,7 @@ module MailSmtp
       logger: nil, logger_severity: nil)
       validate_options(tls: tls, auth: auth, starttls: starttls, max_connections: max_connections,
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
-        max_recipients: max_recipients, max_auth_failures: max_auth_failures,
+        max_processings_per_ip: max_processings_per_ip, max_recipients: max_recipients, max_auth_failures: max_auth_failures,
         max_exceptions: max_exceptions, min_data_rate: min_data_rate,
         error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
         max_messages_per_ip: max_messages_per_ip,
@@ -181,6 +181,7 @@ module MailSmtp
       @max_connections = max_connections
       @max_connections_per_ip = max_connections_per_ip
       @max_processings = max_processings
+      @max_processings_per_ip = max_processings_per_ip
       @max_processings_wait = max_processings_wait
       @auth = auth
       @starttls = starttls
@@ -221,7 +222,8 @@ module MailSmtp
 
       @connection_threads = []
       @connection_ips = {}
-      @processing_threads = []
+      # Each processing thread's client, for +max_processings_per_ip+.
+      @processing_threads = {}
       @admitted = 0
       @slot_mutex = Mutex.new
       @slot_released = ConditionVariable.new
@@ -409,7 +411,7 @@ module MailSmtp
       # Order matters: it decides which error a caller sees when two options are
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
-        max_connections_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
+        max_connections_per_ip:, max_processings_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:,
         min_data_rate:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
         max_auth_attempts_per_ip:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
@@ -423,6 +425,9 @@ module MailSmtp
         raise ArgumentError, "max_processings must be an Integer >= 1" unless max_processings.is_a?(Integer) && max_processings >= 1
         unless max_connections_per_ip.nil? || (max_connections_per_ip.is_a?(Integer) && max_connections_per_ip >= 1)
           raise ArgumentError, "max_connections_per_ip must be nil or an Integer >= 1"
+        end
+        unless max_processings_per_ip.nil? || (max_processings_per_ip.is_a?(Integer) && max_processings_per_ip >= 1)
+          raise ArgumentError, "max_processings_per_ip must be nil or an Integer >= 1"
         end
         unless max_auth_failures.nil? || (max_auth_failures.is_a?(Integer) && max_auth_failures >= 1)
           raise ArgumentError, "max_auth_failures must be nil or an Integer >= 1"
@@ -774,17 +779,28 @@ module MailSmtp
         end
       end
 
-      def claim_processing_slot
+      # A client past its own share is refused at once, not queued behind itself, and
+      # re-checked after each wait, as its other connections may have claimed meanwhile.
+      def claim_processing_slot(remote_ip)
+        client = ClientKey.of(remote_ip)
+
         @slot_mutex.synchronize do
           deadline = monotonic_time + @max_processings_wait
-          until processings_count < max_processings
+          loop do
+            raise TooManyProcessings, "Too many messages at once from #{remote_ip}" if processings_cap_reached?(client)
+            break if processings_count < max_processings
+
             remaining = deadline - monotonic_time
             raise ServerBusy, "Dropping connection: no processing slot free within #{@max_processings_wait}s" if remaining <= 0
 
             @slot_released.wait(@slot_mutex, remaining)
           end
-          @processing_threads << Thread.current
+          @processing_threads[Thread.current] = client
         end
+      end
+
+      def processings_cap_reached?(client)
+        @max_processings_per_ip && client && @processing_threads.count { |_thread, key| key == client } >= @max_processings_per_ip
       end
 
       def release_processing_slot
@@ -1357,7 +1373,7 @@ module MailSmtp
 
         # Claimed before the 354: a saturated server must not invite a body it
         # cannot process yet and only find that out afterward.
-        claim_processing_slot
+        claim_processing_slot(session.remote_ip)
         session.phase = :data
         reply(354, "Start mail input; end with <CRLF>.<CRLF>", enhanced: nil)
       end

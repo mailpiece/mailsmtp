@@ -15,6 +15,7 @@
 - Changed: a control character or DEL in a MAIL FROM or RCPT TO mailbox is refused with a 501
 - Changed: a client's command logs at DEBUG with control characters as `?`, as Postfix's `printable()`
 - Changed: `max_connections_per_ip` counts an IPv6 client by its /64 and `::ffff:a.b.c.d` as `a.b.c.d`, as the per-IP rates do
+- Added `max_processings_per_ip` (`nil` disables): past it, DATA gets a 451 (`TooManyProcessings`) instead of waiting for a slot
 
 ## 0.7.0
 

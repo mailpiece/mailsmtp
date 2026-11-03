@@ -262,6 +262,7 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 | `ServerBusy`                     | 421    | 4.3.2    | (as `ServiceUnavailable`) — no connection or processing slot free |               |
 | `LocalError`                     | 451    | 4.3.0    | Requested action aborted: local error in processing               |               |
 | `RateLimited`                    | 450    | 4.7.1    | Requested mail action not taken: too many messages from your address |            |
+| `TooManyProcessings`             | 451    | 4.7.0    | Requested action aborted: too many messages at once               |               |
 | `TooManyRecipients`              | 452    | 4.5.3    | Requested action not taken: too many recipients                   |               |
 | `TlsUnavailable`                 | 454    | 4.7.0    | TLS not available due to temporary reason                         |               |
 | `AuthenticationTemporarilyUnavailable` | 454 | 4.7.0  | Temporary authentication failure                                  |               |
@@ -367,6 +368,7 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `max_connections_per_ip` | `nil`               | Per-IP concurrent connections, an IPv6 client counted by its /64; `nil` disables. Enforced once the peer is known, so after a PROXY line                                                 |
 | `max_processings`        | required arg        | Concurrent DATA transfers; idle sessions do not consume a slot                                                                                                                          |
 | `max_processings_wait`   | `30`                | Seconds to wait for a DATA processing slot before 421                                                                                                                                   |
+| `max_processings_per_ip` | `nil`              | Concurrent DATA transfers from one client, an IPv6 client counted by its /64; past it, DATA gets a 451 (`TooManyProcessings`) at once instead of waiting. `nil` disables                 |
 | `max_auth_failures`      | `3`                 | Failed AUTH attempts before 421; `nil` disables                                                                                                                                         |
 | `max_exceptions`         | `20`                | Protocol errors before 421; `nil` disables                                                                                                                                              |
 | `error_sleep_after`      | `nil`               | Errors a session may make before each further error reply is delayed by `error_sleep_time` (Postfix `smtpd_soft_error_limit`); `nil` disables                                           |
