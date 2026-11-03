@@ -3,6 +3,9 @@
 name: Release
 on:
   workflow_dispatch:
+
+permissions: {}
+
 jobs:
   release:
     name: Test and push gem to RubyGems.org
@@ -16,8 +19,10 @@ jobs:
           persist-credentials: false
       - name: Set up Ruby
         uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
-        with:
-          bundler-cache: true
+      - name: Install gems
+        run: bundle install
+        env:
+          BUNDLE_FROZEN: "true"
       - name: Run tests
         run: bundle exec rake
       - name: Publish to RubyGems.org
@@ -32,7 +37,7 @@ jobs:
             keep && /^## / && $0 != "## " ver { keep = 0 }
             keep { print }
           ' CHANGELOG.md > release-notes.md
-      - name: Create GitHub Release
+      - name: Create GitHub Release # zizmor: ignore[superfluous-actions]
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
