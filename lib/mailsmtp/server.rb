@@ -1467,8 +1467,6 @@ module MailSmtp
           bytes_received[0] += line.bytesize + 2
           return "#{line}\r\n"
         end
-      rescue LineBuffer::BufferOverrun
-        raise ServiceUnavailable, "Input buffer overrun"
       rescue EOFError, Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED
         raise ConnectionLost, "Connection lost during DATA"
       end
@@ -1492,6 +1490,9 @@ module MailSmtp
       rescue IO::WaitWritable
         yield
         IO.select(nil, [ io.to_io ], nil, READ_WAIT_SECONDS)
+      rescue LineBuffer::BufferOverrun
+        # The client's doing, in a command or a body alike.
+        raise ServiceUnavailable, "Input buffer overrun"
       end
 
       def monotonic_time

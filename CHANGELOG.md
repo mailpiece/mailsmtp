@@ -10,6 +10,7 @@
 - Fixed: a `.` after a bare LF no longer ends DATA, and a bare LF behind a long line or an error from `receive` closes the connection
 - Fixed: under stress, `min_data_rate`'s grace drops to 10 seconds with the idle timeout
 - Fixed: a connection thread that cannot be started no longer stops the listener; it backs off as it does when out of descriptors
+- Fixed: a command line past `pending_input_limit` gets a 421 logged at INFO, not an ERROR
 
 ## 0.7.0
 
