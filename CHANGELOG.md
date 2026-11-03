@@ -5,6 +5,7 @@
 - Added the `before_banner(session, io)` hook, called with the client's socket before the banner
 - Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header
 - Changed: with `proxy_hosts` set, a client may no longer pipeline behind its first command unless `pipelining` is on
+- Added hooks to observe refused connections, the error tarpit and every reply
 
 ## 0.7.0
 
