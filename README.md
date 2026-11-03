@@ -201,7 +201,7 @@ end
 | `build_session`     | `()`                                                 | a `Session` (or subclass)                                                                                                                                                                                     |
 | `process_line`      | `(session, line)`                                    | override for policy; call `super` for dispatch — dispatches on `session.phase` ([Session and Envelope](#session-and-envelope))                                                                                |
 | `unknown_command`   | `(session, line)`                                    | default raises `CommandNotRecognized`                                                                                                                                                                         |
-| `log`               | `(session, severity, msg, err:)`                     | —                                                                                                                                                                                                             |
+| `log`               | `(session, severity, msg, err:)`                     | a refusal of the client (any `MailSmtp::Error`, a timeout, a broken connection or TLS) is INFO, the server out of capacity (`ServerBusy`) is WARN, and an unexpected failure, a hook's or ours, is ERROR |
 
 #### Before the banner
 
@@ -226,7 +226,7 @@ end
 
 #### Observers
 
-For metrics, the engine also reports what it decided on its own. These hooks are called once it has acted and their return value is ignored. An exception raised in one is logged at ERROR, as an error in `receive` would be, and the connection carries on.
+For metrics, the engine also reports what it decided on its own. These hooks are called once it has acted and their return value is ignored. An exception raised in one is logged at ERROR, as an unexpected error in `receive` would be, and the connection carries on.
 
 | Hook                  | Signature            | Called                                                                                                                                                               |
 | --------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -249,6 +249,7 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 | -------------------------------- | ------ | -------- | ----------------------------------------------------------------- | ------------- |
 | `ServiceUnavailable`             | 421    | 4.3.2    | Service not available, closing transmission channel               |               |
 | `ConnectionLost`                 | 421    | 4.3.2    | (as `ServiceUnavailable`) — peer gone before a reply could arrive |               |
+| `ServerBusy`                     | 421    | 4.3.2    | (as `ServiceUnavailable`) — no connection or processing slot free |               |
 | `LocalError`                     | 451    | 4.3.0    | Requested action aborted: local error in processing               |               |
 | `RateLimited`                    | 450    | 4.7.1    | Requested mail action not taken: too many messages from your address |            |
 | `TooManyRecipients`              | 452    | 4.5.3    | Requested action not taken: too many recipients                   |               |

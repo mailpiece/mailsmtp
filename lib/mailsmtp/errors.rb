@@ -10,6 +10,10 @@ module MailSmtp
   class ConnectionLost < ServiceUnavailable
   end
 
+  # 421 — the server itself is out of capacity: no connection or processing slot is free.
+  class ServerBusy < ServiceUnavailable
+  end
+
   # 450 — this address has started more messages this minute than max_messages_per_ip allows
   class RateLimited < Error
     status 450, "Requested mail action not taken: too many messages from your address", enhanced: "4.7.1"
