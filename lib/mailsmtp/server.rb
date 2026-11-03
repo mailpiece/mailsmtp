@@ -328,7 +328,7 @@ module MailSmtp
     def helo(session, name)
     end
 
-    # Verify +username+/+password+, raising +AuthenticationFailed+ otherwise.
+    # Verify +username+/+password+, raising +AuthenticationFailed+ or returning false otherwise.
     # +authorization_id+ is the SASL PLAIN authzid — an unverified claim, ignored here.
     def authenticate(session, username:, password:, authorization_id: "")
       raise AuthenticationFailed
@@ -1601,6 +1601,9 @@ module MailSmtp
           username: authentication_id,
           password: authentication,
           authorization_id: requested_authorization_id)
+        # A predicate's false is a refusal; nil is a hook that raises on failure.
+        raise AuthenticationFailed if granted == false
+
         # A non-empty String or Symbol is the application naming the identity —
         # authoritative, and may differ from the client's claim.
         granted = granted.to_s if granted.is_a?(String) || granted.is_a?(Symbol)
