@@ -111,8 +111,9 @@ class MailSmtp::RateLimitsTest < MailSmtp::ServerIntegrationTest
     start_server(proxy_hosts: [ "127.0.0.1" ], max_messages_per_ip: 1)
 
     first = connect(port)
+    first.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
     read_smtp_response(first)
-    first.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\nEHLO test.client.example\r\n")
+    first.print("EHLO test.client.example\r\n")
     read_smtp_lines(first)
     first.print("MAIL FROM:<a@example.com>\r\n")
     assert_match(/\A250 /, read_smtp_response(first).to_s)
@@ -122,8 +123,9 @@ class MailSmtp::RateLimitsTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A450 /, read_smtp_response(first).to_s)
 
     second = connect(port)
+    second.print("PROXY TCP4 203.0.113.10 10.0.0.1 12345 #{port}\r\n")
     read_smtp_response(second)
-    second.print("PROXY TCP4 203.0.113.10 10.0.0.1 12345 #{port}\r\nEHLO test.client.example\r\n")
+    second.print("EHLO test.client.example\r\n")
     read_smtp_lines(second)
     second.print("MAIL FROM:<a@example.com>\r\n")
     assert_match(/\A250 /, read_smtp_response(second).to_s)

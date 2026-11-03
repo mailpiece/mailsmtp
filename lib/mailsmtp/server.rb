@@ -101,8 +101,11 @@ module MailSmtp
     # either of which resolves to an address the header never actually named.
     PROXY_ADDRESS = /\A[0-9a-f.:]+\z/i
     PROXY_PORT = /\A[0-9]+\z/
+    # v1 §2.1: the longest header, TCP6 with every field at its widest, is 107
+    # bytes with its CRLF.
+    PROXY_HEADER_BYTES = 107
     private_constant :PROXY_TRANSPORTS, :PROXY_UNSPECIFIED, :PROXY_ENDPOINT_FIELDS,
-      :PROXY_ADDRESS, :PROXY_PORT
+      :PROXY_ADDRESS, :PROXY_PORT, :PROXY_HEADER_BYTES
 
     # Raised into the acceptor threads by +stop+, and deliberately a StandardError
     # where StopConnection is an Exception: an acceptor runs no application code, so
@@ -749,6 +752,8 @@ module MailSmtp
           session.greeting = session.local_ip
 
           claim_connection_slot(session.remote_ip, enforce_per_ip: !proxy_allowed?(session.remote_ip))
+          session_deadline = @max_session_duration && (monotonic_time + @max_session_duration)
+          read_proxy_header(session, io, session_deadline) if proxy_allowed?(session.remote_ip)
           connected(session)
           notified_connected = true
 
@@ -758,7 +763,6 @@ module MailSmtp
           buffer = LineBuffer.new(pending_limit: @pending_input_limit,
             compaction_floor: READ_CHUNK_BYTES)
           idle_since = monotonic_time
-          session_deadline = @max_session_duration && (idle_since + @max_session_duration)
 
           loop do
             if session.phase == :starttls
@@ -883,6 +887,33 @@ module MailSmtp
         end
 
         io
+      end
+
+      # A proxy sends its header the moment it connects, so it is read before the
+      # banner and +connected+ meets the client it names. A byte at a time, because
+      # whatever the client sent behind it has to stay on the socket.
+      def read_proxy_header(session, io, session_deadline)
+        line = String.new
+        idle_since = monotonic_time
+
+        until line.end_with?("\r\n")
+          raise ServiceUnavailable, "Dropping connection: malformed PROXY header" if line.bytesize >= PROXY_HEADER_BYTES
+
+          case byte = io.read_nonblock(1, exception: false)
+          when :wait_readable
+            raise_if_session_expired(session_deadline)
+            raise_if_idle_timeout(idle_since)
+            IO.select([ io ], nil, nil, READ_WAIT_SECONDS)
+          when nil
+            raise EOFError
+          else
+            line << byte
+          end
+        end
+
+        line = line.chomp("\r\n")
+        log(session, Logger::DEBUG, "<<< #{line}\n")
+        process_line(session, line)
       end
 
       # RFC 5321 §4.1.1.1 constrains a HELO name, but refusing junk rejects too much

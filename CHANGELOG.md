@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header
+
 ## 0.7.0
 
 - Added `max_messages_per_ip`, `max_tls_sessions_per_ip` and `max_auth_attempts_per_ip` (`nil` disables), per-minute caps on one client address: 450 at MAIL FROM, 454 at STARTTLS and AUTH

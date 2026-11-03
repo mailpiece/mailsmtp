@@ -5,11 +5,24 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     start_server(proxy_hosts: [ "127.0.0.1" ])
 
     socket = connect(port)
-    read_smtp_response(socket)
     socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
-    # no reply
+    # no reply to PROXY itself, only the banner
+    assert_match(/\A220 /, read_smtp_response(socket).to_s)
     socket.print("EHLO test.client.example\r\n")
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
+  end
+
+  # The proxy speaks first, so the banner waits for it and is decided knowing the client.
+  def test_waits_for_proxy_before_the_banner
+    server = ConnectedRecordingServer.new(**server_options(proxy_hosts: [ "127.0.0.1" ]))
+    start(server)
+
+    socket = connect(port)
+    assert_nil IO.select([ socket ], nil, nil, 0.3)
+
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    assert_match(/\A220 /, read_smtp_response(socket).to_s)
+    assert_equal "203.0.113.9", server.connected_remote_ip
   end
 
   # PROXY ports are decimal like every other port we read: a proxy that pads
@@ -19,8 +32,9 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     start(server)
 
     socket = connect(port)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 08025 00025\r\n")
     read_smtp_response(socket)
-    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 08025 00025\r\nEHLO test.client.example\r\n")
+    socket.print("EHLO test.client.example\r\n")
 
     assert_match(/\A250 /, read_smtp_lines(socket).last.to_s)
     assert_equal 8025, server.proxy_data[:source_port]
@@ -42,8 +56,16 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     start_server(proxy_hosts: [ "127.0.0.1" ])
 
     socket = connect(port)
-    read_smtp_response(socket)
     socket.print("EHLO test.client.example\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_refuses_a_proxy_header_longer_than_the_protocol_allows
+    start_server(proxy_hosts: [ "127.0.0.1" ])
+
+    socket = connect(port)
+    socket.print("PROXY UNKNOWN #{"x" * 120}\r\n")
 
     assert_match(/\A421 /, read_smtp_response(socket).to_s)
   end
@@ -63,8 +85,8 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     start_server(proxy_hosts: [ "127.0.0.1" ])
 
     socket = connect(port)
-    read_smtp_response(socket)
     socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    read_smtp_response(socket)
     socket.print("EHLO test.client.example\r\n")
     read_smtp_lines(socket)
     socket.print("RSET\r\n")
@@ -73,13 +95,24 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
   end
 
+  def test_refuses_a_second_proxy_header
+    start_server(proxy_hosts: [ "127.0.0.1" ])
+
+    socket = connect(port)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    read_smtp_response(socket)
+    socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+
+    assert_match(/\A421 /, read_smtp_response(socket).to_s)
+  end
+
   # PROXY belongs to the connection, not to what STARTTLS resets.
   def test_proxy_is_not_required_again_after_starttls
     start_server(proxy_hosts: [ "127.0.0.1" ], tls: FakeTls.new)
 
     socket = connect(port)
-    read_smtp_response(socket)
     socket.print("PROXY TCP4 203.0.113.9 10.0.0.1 12345 #{port}\r\n")
+    read_smtp_response(socket)
     socket.print("EHLO test.client.example\r\n")
     read_smtp_lines(socket)
     socket.print("STARTTLS\r\n")
@@ -94,8 +127,8 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     start_server(proxy_hosts: [ "127.0.0.1" ])
 
     socket = connect(port)
-    read_smtp_response(socket)
     socket.print("PROXY UNKNOWN\r\n")
+    read_smtp_response(socket)
     socket.print("EHLO test.client.example\r\n")
 
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
@@ -108,14 +141,13 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
     # only after PROXY rewrites to distinct client addresses.
     first = connect(port)
     second = connect(port)
+    first.print("PROXY TCP4 203.0.113.10 10.0.0.1 12345 #{port}\r\n")
+    second.print("PROXY TCP4 203.0.113.11 10.0.0.1 12346 #{port}\r\n")
     assert_match(/\A220 /, read_smtp_response(first).to_s)
     assert_match(/\A220 /, read_smtp_response(second).to_s)
 
-    first.print("PROXY TCP4 203.0.113.10 10.0.0.1 12345 #{port}\r\n")
     first.print("EHLO a.example\r\n")
     assert_match(/\A250 /, read_smtp_response(first).to_s)
-
-    second.print("PROXY TCP4 203.0.113.11 10.0.0.1 12346 #{port}\r\n")
     second.print("EHLO b.example\r\n")
     assert_match(/\A250 /, read_smtp_response(second).to_s)
   end
@@ -127,12 +159,11 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
 
     replies = Array.new(MAX_PER_IP + 1) do |index|
       socket = connect(port)
-      read_smtp_response(socket)
-      socket.print("PROXY TCP4 127.0.0.1 127.0.0.1 1234#{index} #{port}\r\nEHLO a#{index}.example\r\n")
-      read_smtp_lines(socket).last.to_s
+      socket.print("PROXY TCP4 127.0.0.1 127.0.0.1 1234#{index} #{port}\r\n")
+      read_smtp_response(socket).to_s
     end
 
-    assert_equal MAX_PER_IP, replies.count { |reply| reply.start_with?("250") }
+    assert_equal MAX_PER_IP, replies.count { |reply| reply.start_with?("220") }
     assert_equal 1, replies.count { |reply| reply.start_with?("421") }
   end
 
@@ -141,14 +172,13 @@ class MailSmtp::ProxyTest < MailSmtp::ServerIntegrationTest
   def test_proxy_unknown_applies_the_per_ip_cap_to_the_peer
     start_server(proxy_hosts: [ "127.0.0.1" ], max_connections_per_ip: MAX_PER_IP)
 
-    replies = Array.new(MAX_PER_IP + 1) do |index|
+    replies = Array.new(MAX_PER_IP + 1) do
       socket = connect(port)
-      read_smtp_response(socket)
-      socket.print("PROXY UNKNOWN\r\nEHLO a#{index}.example\r\n")
-      read_smtp_lines(socket).last.to_s
+      socket.print("PROXY UNKNOWN\r\n")
+      read_smtp_response(socket).to_s
     end
 
-    assert_equal MAX_PER_IP, replies.count { |reply| reply.start_with?("250") }
+    assert_equal MAX_PER_IP, replies.count { |reply| reply.start_with?("220") }
     assert_equal 1, replies.count { |reply| reply.start_with?("421") }
   end
 end

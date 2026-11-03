@@ -259,6 +259,14 @@ module MailSmtp
       end
     end
 
+    class ConnectedRecordingServer < ReceivingServer
+      attr_reader :connected_remote_ip
+
+      def connected(session)
+        @connected_remote_ip = session.remote_ip
+      end
+    end
+
     # Slow enough that a forced stop always lands mid-command, and counts the
     # calls so a test can tell whether the pipeline behind it also ran.
     class SlowCommandServer < ReceivingServer
