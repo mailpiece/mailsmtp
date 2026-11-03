@@ -86,6 +86,12 @@ module MailSmtp
     private_constant :ACCEPT_BACKOFF_ERRORS, :ACCEPT_RETRY_ERRORS,
       :MIN_ACCEPT_BACKOFF, :MAX_ACCEPT_BACKOFF
 
+    # The client broke the connection or its TLS, which is no fault of ours, so
+    # like a refusal it logs at INFO.
+    REMOTE_FAULTS = [ EOFError, Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED,
+      Errno::ETIMEDOUT, OpenSSL::SSL::SSLError ].freeze
+    private_constant :REMOTE_FAULTS
+
     # Floor on the unwind of a forced stop before the socket is reset and the thread
     # abandoned — never zero, even for +stop(drain_for: 0)+.
     MIN_UNWIND_GRACE = 1
@@ -749,7 +755,7 @@ module MailSmtp
         observing(nil) { connection_refused(remote_ip, limit) }
 
         if limit == :max_connections
-          raise ServiceUnavailable, "Dropping connection: max_connections (#{max_connections}) reached"
+          raise ServerBusy, "Dropping connection: max_connections (#{max_connections}) reached"
         else
           raise ServiceUnavailable, "Too many connections from #{remote_ip}"
         end
@@ -770,7 +776,7 @@ module MailSmtp
           deadline = monotonic_time + @max_processings_wait
           until processings_count < max_processings
             remaining = deadline - monotonic_time
-            raise ServiceUnavailable, "Dropping connection: no processing slot free within #{@max_processings_wait}s" if remaining <= 0
+            raise ServerBusy, "Dropping connection: no processing slot free within #{@max_processings_wait}s" if remaining <= 0
 
             @slot_released.wait(@slot_mutex, remaining)
           end
@@ -817,7 +823,7 @@ module MailSmtp
               rescue Timeout::Error, IO::TimeoutError
                 raise ServiceUnavailable, "STARTTLS timed out"
               rescue StandardError => e
-                log(session, Logger::ERROR, loggable_error(e), err: e)
+                log(session, remote_fault?(e) ? Logger::INFO : Logger::ERROR, loggable_error(e), err: e)
                 return io
               end
 
@@ -868,7 +874,7 @@ module MailSmtp
                 raise
               rescue PipeliningNotSupported => e
                 session.exceptions += 1
-                log(session, Logger::ERROR, loggable_error(e), err: e)
+                log(session, Logger::INFO, loggable_error(e), err: e)
                 error_sleep(session)
                 respond(io, session, e.response)
                 # Drop the pipelined continuation still buffered (e.g. an AUTH credential)
@@ -878,7 +884,8 @@ module MailSmtp
               rescue Error => e
                 session.exceptions += 1
                 session.auth_failures += 1 if e.is_a?(AuthenticationFailed)
-                log(session, Logger::ERROR, loggable_error(e), err: e)
+                # A refusal, the engine's or a hook's policy answer, is not our failure.
+                log(session, Logger::INFO, loggable_error(e), err: e)
                 error_sleep(session)
                 respond(io, session, e.response)
                 raise_if_exception_caps(session, e)
@@ -915,7 +922,8 @@ module MailSmtp
           log(session, Logger::DEBUG, "Client hung up (#{e.class})", err: e)
         rescue ServiceUnavailable => e
           session.exceptions += 1
-          log(session, Logger::ERROR, loggable_error(e), err: e)
+          # Out of capacity is ours to fix; every other 421 is the client's doing.
+          log(session, e.is_a?(ServerBusy) ? Logger::WARN : Logger::INFO, loggable_error(e), err: e)
           begin
             respond(io, session, e.response, abort_reply: true)
           rescue ServiceUnavailable, StandardError => send_error
@@ -923,7 +931,7 @@ module MailSmtp
           end
         rescue StandardError => e
           session.exceptions += 1
-          log(session, Logger::ERROR, loggable_error(e), err: e)
+          log(session, remote_fault?(e) ? Logger::INFO : Logger::ERROR, loggable_error(e), err: e)
           begin
             respond(io, session, ServiceUnavailable.new.response, abort_reply: true)
           rescue ServiceUnavailable, StandardError => send_error
@@ -1005,6 +1013,10 @@ module MailSmtp
 
       def auth_value_phase?(phase)
         %i[ auth_plain auth_login_user auth_login_pass ].include?(phase)
+      end
+
+      def remote_fault?(error)
+        REMOTE_FAULTS.any? { |fault| error.is_a?(fault) }
       end
 
       # A bare exception's message *is* its class name, so the usual "message (Class)"
@@ -1347,9 +1359,10 @@ module MailSmtp
       def transfer_data(session, io, buffer, session_deadline: nil)
         error = receive_data(session, io, buffer, session_deadline: session_deadline)
 
+        # A refusal, or the 451 for a fault +receive_data+ has already logged at ERROR.
         if error
           session.exceptions += 1
-          log(session, Logger::ERROR, loggable_error(error), err: error)
+          log(session, Logger::INFO, loggable_error(error), err: error)
           error_sleep(session)
           error.response
         else

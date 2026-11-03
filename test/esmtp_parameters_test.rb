@@ -55,7 +55,7 @@ class MailSmtp::EsmtpParametersTest < MailSmtp::ServerIntegrationTest
   def test_rejects_mail_from_when_declared_size_exceeds_limit
     io = StringIO.new
     logger = Logger.new(io)
-    logger.level = Logger::ERROR
+    logger.level = Logger::INFO
     start_server(max_message_size: 100, logger: logger)
 
     socket = connect(port)
