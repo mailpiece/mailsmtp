@@ -11,7 +11,7 @@ Use it anywhere you need to accept mail directly instead of going through a host
 - the protocol — AUTH, MAIL FROM, RCPT TO, DATA, STARTTLS, PIPELINING
 - streaming — `receive` gets a live `io` into the DATA stream, so nothing buffers the whole message
 - size limits — SIZE is advertised and enforced as DATA arrives
-- smuggling protection — bare LF and bare CR in DATA are rejected by default
+- smuggling protection — only CRLF `.` CRLF ends DATA, never a `.` behind a bare LF or CR
 - backpressure — concurrent DATA transfers are capped, with a queue and timeout
 - hot reloading — swap the STARTTLS certificate without restarting
 
@@ -174,6 +174,8 @@ end
 ```
 
 SIZE / line-length failures raise a `MailSmtp::Error` from `read` / `readpartial` (not a short successful body). Mid-DATA disconnect raises `ServiceUnavailable`. If `receive` ignores the io, the reply still comes from the reader's failure after drain.
+
+Unless `forbid_bare_newline` is on, a bare LF or bare CR reaches `receive` as the client sent it. A backend that relays the message onward over SMTP must normalize its line endings to CRLF first: passed on raw, a bare LF may be refused by the next server, or framed by it differently than here.
 
 ## Reference
 
@@ -360,7 +362,7 @@ Reset at `session.reset` — after HELO/EHLO, RSET, DATA completing, and STARTTL
 | `pipelining`             | `false`             | RFC 2920; STARTTLS always drops plaintext buffers                                                                                                                                       |
 | `proxy_hosts`            | `[]`                | PROXY v1 from these IPs/CIDRs, which must send it first: they get no banner until it arrives                                                                                            |
 | `add_received`           | `false`             | Prefix `received_header` onto the DATA reader                                                                                                                                           |
-| `forbid_bare_newline`    | `true`              | Reject DATA lines carrying a bare LF or a bare CR (SMTP smuggling)                                                                                                                      |
+| `forbid_bare_newline`    | `false`             | Refuse DATA lines carrying a bare LF or a bare CR with a 550; when `false` they reach `receive` unchanged                                                                               |
 | `strict_path`            | `true`              | Require angle brackets on the envelope path; `false` also takes a bare path, ending it at the first space                                                                               |
 | `max_message_size`       | `10485760` (10 MiB) | Advertises SIZE and enforces as DATA arrives; `nil` disables                                                                                                                            |
 | `max_recipients`         | `100`               | Minimum 100 (RFC 5321); enforced at RCPT TO                                                                                                                                             |

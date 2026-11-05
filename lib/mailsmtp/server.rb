@@ -159,7 +159,7 @@ module MailSmtp
       host: nil, port: nil, hosts: nil, ports: nil, listeners: nil,
       max_connections_per_ip: nil, max_processings_per_ip: nil, eight_bit_mime: false, smtputf8: false,
       pipelining: false, proxy_hosts: [], add_received: false,
-      forbid_bare_newline: true, strict_path: true,
+      forbid_bare_newline: false, strict_path: true,
       max_message_size: MAX_MESSAGE_SIZE, max_recipients: MAX_RECIPIENTS,
       max_processings_wait: MAX_PROCESSINGS_WAIT,
       read_timeout: READ_TIMEOUT, write_timeout: WRITE_TIMEOUT,
@@ -1473,8 +1473,8 @@ module MailSmtp
         release_processing_slot
       end
 
-      # Next DATA line as dot-unstuffed bytes plus CRLF, or +nil+ at the terminator, which
-      # is only <CRLF>.<CRLF>: a dot after a bare LF is body.
+      # Next DATA line as dot-unstuffed bytes with its own line ending, or +nil+ at the
+      # terminator, which is only <CRLF>.<CRLF>, never a dot line behind a bare LF.
       def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf)
         loop do
           raise_if_session_expired(session_deadline)
@@ -1501,14 +1501,15 @@ module MailSmtp
 
           idle_since[0] = monotonic_time
 
-          # As Postfix's smtpd_forbid_bare_newline = normalize: both ends of the dot need CRLF.
+          # Both ends of the dot need CRLF.
           return nil if line == "." && crlf && after_crlf[0]
 
           after_crlf[0] = crlf
 
           line.slice!(0) if line[0] == "."
-          bytes_received[0] += line.bytesize + 2
-          return "#{line}\r\n"
+          line << (crlf ? "\r\n" : "\n")
+          bytes_received[0] += line.bytesize
+          return line
         end
       rescue EOFError, Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED
         raise ConnectionLost, "Connection lost during DATA"

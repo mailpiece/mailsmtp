@@ -137,7 +137,7 @@ module MailSmtp
           return
         end
 
-        if !@draining && !@headers_seen && line == "\r\n".b
+        if !@draining && !@headers_seen && (line == "\r\n".b || line == "\n".b)
           @headers_seen = true
           @on_headers&.call
         end
@@ -148,8 +148,8 @@ module MailSmtp
       rescue ServiceUnavailable
         raise
       rescue Error => e
-        # A bare LF behind a long line must still stop the drain, which a recoverable
-        # failure recorded first would otherwise hide.
+        # Under +forbid_bare_newline+, a bare LF behind a long line must still stop the
+        # drain, which a recoverable failure recorded first would otherwise hide.
         @failure = e if @failure.nil? || (e.unrecoverable? && !@failure.unrecoverable?)
       end
   end
