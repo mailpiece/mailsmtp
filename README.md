@@ -164,7 +164,7 @@ One server object owns policy. `Session` just holds connection state (envelope, 
 
 ### DATA — live reader into receive
 
-After `354`, the engine builds a `DataReader` over the socket (dot-unstuffing, SIZE, line limits) — wrapped in a `PrefixedReader` when `add_received: true` prepends the Received header — and calls `receive(session, io)`. Both are `IO`-shaped (`read`, `readpartial`, `eof?`, `binmode`, `close`, `closed?`) and safe to hand to `IO.copy_stream`; which one `io` actually is is an implementation detail. Prefer `IO.copy_stream` (or chunked reads); the engine **drains** through `.` then sends **one** reply — except when SIZE/`MessageTooLarge` (or the drain byte ceiling) forces a close after the error reply (no unbounded drain).
+After `354`, the engine builds a `DataReader` over the socket (dot-unstuffing, SIZE) — wrapped in a `PrefixedReader` when `add_received: true` prepends the Received header — and calls `receive(session, io)`. Both are `IO`-shaped (`read`, `readpartial`, `eof?`, `binmode`, `close`, `closed?`) and safe to hand to `IO.copy_stream`; which one `io` actually is is an implementation detail. Prefer `IO.copy_stream` (or chunked reads); the engine **drains** through `.` then sends **one** reply — except when SIZE/`MessageTooLarge` (or the drain byte ceiling) forces a close after the error reply (no unbounded drain).
 
 ```ruby
 def receive(session, io)
@@ -173,7 +173,7 @@ def receive(session, io)
 end
 ```
 
-SIZE / line-length failures raise a `MailSmtp::Error` from `read` / `readpartial` (not a short successful body). Mid-DATA disconnect raises `ServiceUnavailable`. If `receive` ignores the io, the reply still comes from the reader's failure after drain.
+A failure such as SIZE raises a `MailSmtp::Error` from `read` / `readpartial` (not a short successful body). Mid-DATA disconnect raises `ServiceUnavailable`. If `receive` ignores the io, the reply still comes from the reader's failure after drain.
 
 ## Reference
 
@@ -267,7 +267,6 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 | `TlsUnavailable`                 | 454    | 4.7.0    | TLS not available due to temporary reason                         |               |
 | `AuthenticationTemporarilyUnavailable` | 454 | 4.7.0  | Temporary authentication failure                                  |               |
 | `CommandNotRecognized`           | 500    | 5.5.1    | Syntax error, command unrecognized                                |               |
-| `LineTooLong`                    | 500    | 5.5.2    | Line too long                                                     |               |
 | `PipeliningNotSupported`         | 500    | 5.5.2    | Pipelining is not supported; commands must be sent one at a time  |               |
 | `InvalidParameters`              | 501    | 5.5.4    | Syntax error in parameters or arguments                           |               |
 | `CommandNotImplemented`          | 502    | 5.5.1    | Command not implemented                                           |               |
@@ -283,6 +282,8 @@ Every built-in error the engine itself can raise. Raise any of these from a hook
 
 
 All descend from `MailSmtp::Error`, so `rescue MailSmtp::Error` catches any of them (e.g. from code shared between hooks). Define your own the same way — see the `BlockedSender` example above.
+
+`LineTooLong`, `MAX_TEXT_LINE_LENGTH` and `DataReader`'s `max_line_length:` are deprecated and do nothing, since a DATA line may be any length; they remain so existing code keeps loading.
 
 ### Session and Envelope
 

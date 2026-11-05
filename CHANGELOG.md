@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: a DATA line past 1000 octets is accepted, bounded only by `max_message_size`; `LineTooLong`, `MAX_TEXT_LINE_LENGTH` and `max_line_length:` are deprecated no-ops
 - Added the `before_banner(session, io)` hook, called with the client's socket before the banner
 - Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header
 - Changed: with `proxy_hosts` set, a client may no longer pipeline behind its first command unless `pipelining` is on

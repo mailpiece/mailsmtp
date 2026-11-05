@@ -57,6 +57,21 @@ module MailSmtp
       end
     end
 
+    # The front of a body line still waiting for its terminator, once more than
+    # +min_bytes+ of it are buffered, so a long line is handed on in pieces instead
+    # of piling up. The last byte stays behind, and a CR that may be half the CRLF
+    # with it, so the line's rest is never a bare terminator.
+    def take_body_fragment(min_bytes)
+      if @terminator_at.nil? && unread_bytes > [ min_bytes, 2 ].max
+        length = unread_bytes - 1
+        length -= 1 if @pending.getbyte(-1) == 13
+        fragment = @pending.byteslice(@start, length)
+        @start += length
+        compact_pending
+        fragment
+      end
+    end
+
     # Everything read so far is unread again by never having been here: nothing
     # buffered before this call can be handed out after it.
     def discard_pending

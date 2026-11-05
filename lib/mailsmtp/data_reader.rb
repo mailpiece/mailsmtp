@@ -7,13 +7,12 @@ module MailSmtp
 
     attr_reader :failure
 
-    def initialize(max_message_size: nil, max_line_length: Limits::MAX_TEXT_LINE_LENGTH,
-      on_headers: nil, &read_line)
+    # +max_line_length+ is deprecated and ignored: a DATA line may be any length.
+    def initialize(max_message_size: nil, max_line_length: nil, on_headers: nil, &read_line)
       raise ArgumentError, "read_line block required" unless read_line
 
       @read_line = read_line
       @max_message_size = max_message_size
-      @max_line_length = max_line_length
       @on_headers = on_headers
       @buffer = +"".b
       @bytes_seen = 0
@@ -87,7 +86,7 @@ module MailSmtp
       @draining = true
       @buffer = +""
       # Stop on a failure there is nothing to resynchronize for, or on the absolute
-      # drain ceiling when SIZE is off / after LineTooLong — never read forever
+      # drain ceiling when SIZE is off — never read forever
       # waiting for a "." the client may have no way of sending.
       fill_until { @drain_ceiling_hit || @failure&.unrecoverable? }
     end
@@ -122,10 +121,6 @@ module MailSmtp
 
         # Recorded before the drain-ceiling stop below, which must not leave +failure+
         # nil: the default +receive+ never reads, and a nil failure means 250.
-        if line.bytesize > @max_line_length
-          @failure ||= LineTooLong.new
-        end
-
         if @max_message_size && @bytes_seen > @max_message_size
           @failure ||= MessageTooLarge.new
         end
@@ -148,9 +143,7 @@ module MailSmtp
       rescue ServiceUnavailable
         raise
       rescue Error => e
-        # A bare LF behind a long line must still stop the drain, which a recoverable
-        # failure recorded first would otherwise hide.
-        @failure = e if @failure.nil? || (e.unrecoverable? && !@failure.unrecoverable?)
+        @failure ||= e
       end
   end
 
