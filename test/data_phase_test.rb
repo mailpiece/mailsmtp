@@ -36,6 +36,18 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_equal [ "b@example.com" ], server.headers_seen_body
   end
 
+  def test_headers_received_fires_on_a_blank_line_framed_with_bare_lf
+    server = HookRecordingServer.new(**server_options)
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\n\nbody\r\n.\r\n")
+    read_smtp_response(socket)
+    socket.close
+
+    assert_includes server.calls, :headers_received
+  end
+
   def test_headers_received_does_not_fire_for_a_body_with_no_header_break
     server = HookRecordingServer.new(**server_options)
     start(server)
@@ -245,7 +257,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   # A long line is a failure the drain resynchronizes from, and it must not let the
   # bare LF behind it be forgotten: that would end DATA at the <LF>.<CRLF>.
   def test_a_bare_lf_behind_a_long_line_closes_the_connection
-    server = ReceivingServer.new(**server_options(pipelining: true))
+    server = ReceivingServer.new(**server_options(forbid_bare_newline: true, pipelining: true))
     start(server)
 
     socket = data_phase_socket(port)
@@ -257,7 +269,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_a_bare_lf_behind_a_long_line_closes_the_connection_without_pipelining
-    server = ReceivingServer.new(**server_options)
+    server = ReceivingServer.new(**server_options(forbid_bare_newline: true))
     start(server)
 
     socket = data_phase_socket(port)
@@ -270,7 +282,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_a_receive_that_wraps_a_bare_lf_in_its_own_error_still_closes_the_connection
-    server = WrappingServer.new(**server_options(pipelining: true))
+    server = WrappingServer.new(**server_options(forbid_bare_newline: true, pipelining: true))
     start(server)
 
     socket = data_phase_socket(port)
@@ -282,8 +294,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_forbid_bare_newline_rejects_data_with_bare_lf
-    # Default is strict (true) — omit the option so the constructor default is covered.
-    start_server
+    start_server(forbid_bare_newline: true)
 
     socket = connect(port)
     read_smtp_response(socket)
@@ -295,7 +306,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
     socket.print("DATA\r\n")
     assert_match(/\A354 /, read_smtp_response(socket).to_s)
-    socket.print("Subject: hi\n\nbody\n.\r\n")
+    socket.print("Subject: hi\n\nbody\r\n.\r\n")
 
     assert_match(/\A550 /, read_smtp_response(socket).to_s)
   end
@@ -304,7 +315,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   # until read_timeout turned this permanent 550 into a transient 421 — and the sender
   # would keep retrying a message that can never be accepted.
   def test_a_bare_lf_body_is_rejected_without_waiting_for_a_crlf_terminator
-    start_server(read_timeout: 5)
+    start_server(read_timeout: 5, forbid_bare_newline: true)
 
     socket = data_phase_socket(port)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -315,17 +326,17 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_a_bare_lf_closes_the_connection_behind_its_reply
-    start_server
+    start_server(forbid_bare_newline: true)
 
     socket = data_phase_socket(port)
-    socket.print("Subject: hi\n\nbody\n.\r\n")
+    socket.print("Subject: hi\n\nbody\r\n.\r\n")
 
     assert_match(/\A550 /, read_smtp_response(socket).to_s)
     assert_nil socket.gets, "the reply is the last thing on a connection we cannot resynchronize"
   end
 
   def test_a_bare_cr_closes_the_connection_behind_its_reply
-    start_server
+    start_server(forbid_bare_newline: true)
 
     socket = data_phase_socket(port)
     socket.print("Subject: hi\r\n\r\nsplit\rhere\r\n.\r\n")
@@ -370,7 +381,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_forbid_bare_newline_rejects_data_with_a_bare_cr_inside_a_line
-    start_server
+    start_server(forbid_bare_newline: true)
 
     socket = data_phase_socket(port)
     socket.print("Subject: hi\r\n\r\nsplit\rhere\r\n.\r\n")
@@ -379,7 +390,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_forbid_bare_newline_rejects_a_bare_cr_at_the_end_of_a_line
-    start_server
+    start_server(forbid_bare_newline: true)
 
     socket = data_phase_socket(port)
     socket.print("Subject: hi\r\n\r\ntrailing\r\r\n.\r\n")
@@ -415,7 +426,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_still_unstuffs_dots_and_ends_on_the_dot_line_under_the_bare_cr_check
-    server = ReceivingServer.new(**server_options)
+    server = ReceivingServer.new(**server_options(forbid_bare_newline: true))
     start(server)
 
     socket = data_phase_socket(port)
@@ -424,6 +435,63 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
     assert_includes server.received[:data], ".stuffed\r\n..\r\n"
     refute_includes server.received[:data], "\r\n.\r\n"
+  end
+
+  def test_bare_lf_and_bare_cr_reach_receive_unchanged_by_default
+    server = ReceivingServer.new(**server_options)
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\n\nsplit\rhere\nend\r\n.\r\n")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal "Subject: hi\n\nsplit\rhere\nend\r\n", server.received[:data]
+  end
+
+  [
+    [ "lf_dot_lf", "hi\n.\n" ],
+    [ "lf_dot_crlf", "hi\n.\r\n" ],
+    [ "cr_dot_cr", "hi\r.\r" ],
+    [ "crlf_dot_cr_crlf", "hi\r\n.\r\r\n" ]
+  ].each do |name, body|
+    define_method(:"test_#{name}_does_not_end_data_by_default") do
+      server = ReceivingServer.new(**server_options(pipelining: true))
+      start(server)
+
+      socket = data_phase_socket(port)
+      socket.print("Subject: innocent\r\n\r\n#{body}#{SMUGGLED_TRANSACTION}")
+
+      assert_match(/\A250 /, read_smtp_response(socket).to_s)
+      assert_equal 1, server.receive_count
+      assert_equal [ "a@example.com" ], server.mail_from_calls
+      assert_includes server.received[:data], "Subject: FORGED"
+    end
+  end
+
+  # A client framing lines with LF still dot-stuffs them.
+  def test_a_dot_after_a_bare_lf_is_unstuffed_too
+    server = ReceivingServer.new(**server_options)
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\nhi\n..one\n..two\r\n.\r\n")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal "Subject: hi\r\n\r\nhi\n.one\n.two\r\n", server.received[:data]
+  end
+
+  # A long line drains to the terminator, and a bare LF on the way cannot end it early.
+  def test_a_bare_lf_behind_a_long_line_drains_past_the_smuggled_transaction_by_default
+    server = ReceivingServer.new(**server_options(pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    socket.print("RSET\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
   end
 
   # A line every 0.1s never lets read_timeout fire, but at the default 500 bytes/s
