@@ -247,6 +247,56 @@ class MailSmtp::EsmtpParametersTest < MailSmtp::ServerIntegrationTest
     refute_match(/AUTH=/i, server.mail_from_calls.first.to_s)
   end
 
+  # RFC 4954 §5: a MAIL FROM line may run 500 octets past the command limit.
+  def test_accepts_a_mail_from_line_carrying_auth_up_to_1012_octets
+    server = AuthIdentityServer.new(**server_options(auth: :required))
+    start(server)
+
+    socket = authenticated_connection(port)
+    socket.print("#{mail_from_with_auth_of(1012)}\r\n")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_operator server.seen_auth_identity.bytesize, :>, 900
+  end
+
+  def test_refuses_a_mail_from_line_carrying_auth_past_1012_octets
+    start(AuthedServer.new(**server_options(auth: :required)))
+
+    socket = authenticated_connection(port)
+    socket.print("#{mail_from_with_auth_of(1013)}\r\n")
+
+    assert_match(/\A501 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_keeps_the_command_limit_for_mail_from_when_auth_is_disabled
+    start_server(auth: :disabled)
+
+    socket = connect(port)
+    read_smtp_response(socket)
+    socket.print("EHLO test.client.example\r\n")
+    read_smtp_lines(socket)
+    socket.print("#{padded_to("MAIL FROM:<a@example.com>", 512)}\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("RSET\r\n")
+    read_smtp_response(socket)
+    socket.print("#{padded_to("MAIL FROM:<a@example.com>", 513)}\r\n")
+
+    assert_match(/\A501 /, read_smtp_response(socket).to_s)
+  end
+
+  def test_keeps_the_command_limit_for_rcpt_to_when_auth_is_enabled
+    start(AuthedServer.new(**server_options(auth: :required)))
+
+    socket = authenticated_connection(port)
+    socket.print("MAIL FROM:<a@example.com>\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("#{padded_to("RCPT TO:<b@example.com>", 512)}\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    socket.print("#{padded_to("RCPT TO:<c@example.com>", 513)}\r\n")
+
+    assert_match(/\A501 /, read_smtp_response(socket).to_s)
+  end
+
   # Every parameter but AUTH= is still unknown, and stripping AUTH= must not
   # smuggle its neighbours past the 555.
   def test_still_rejects_an_unknown_parameter_next_to_auth
@@ -426,6 +476,17 @@ class MailSmtp::EsmtpParametersTest < MailSmtp::ServerIntegrationTest
   end
 
   private
+    # A MAIL FROM line of +octets+ including its CRLF, padded in the AUTH= identity.
+    def mail_from_with_auth_of(octets)
+      head = "MAIL FROM:<a@example.com> AUTH="
+      "#{head}#{"u" * (octets - head.bytesize - "@example.com".bytesize - 2)}@example.com"
+    end
+
+    # +command+ with trailing spaces to +octets+ including its CRLF.
+    def padded_to(command, octets)
+      command.ljust(octets - 2)
+    end
+
     # AUTH= needs the AUTH extension on, and the engine's only "on" mode also requires
     # authentication before MAIL FROM — so get an AuthedServer session past both.
     def authenticated_connection(port)

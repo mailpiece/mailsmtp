@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: with `auth` on, a MAIL FROM line may run to 1012 octets, room for its AUTH= parameter (RFC 4954 §5)
 - Added the `before_banner(session, io)` hook, called with the client's socket before the banner
 - Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header
 - Changed: with `proxy_hosts` set, a client may no longer pipeline behind its first command unless `pipelining` is on

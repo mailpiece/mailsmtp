@@ -67,6 +67,8 @@ module MailSmtp
     # RFC 4954 §4: AUTH base64 responses (commands and continuations) may be
     # up to 12288 octets — not the 512-octet SMTP command-line ceiling.
     MAX_AUTH_LINE_LENGTH = 12_288
+    # RFC 4954 §5: 500 more for a MAIL FROM that may carry AUTH=.
+    MAX_MAIL_LINE_LENGTH_WITH_AUTH = MAX_COMMAND_LINE_LENGTH + 500
 
     # RFC 5322 header specials: parens (comments), backslash/quote (quoted strings),
     # angle brackets and "@" (addr-spec), ";" (Received date), space (token boundary).
@@ -882,8 +884,7 @@ module MailSmtp
                 # Body lines are not covered: +read_data_line+ takes them from the reader itself.
                 raise PipeliningNotSupported if buffer.pending_line? && !@pipelining && !stray_proxy_line?(session, line)
 
-                max_line = auth_line_length?(session, line) ? MAX_AUTH_LINE_LENGTH : MAX_COMMAND_LINE_LENGTH
-                raise InvalidParameters, "Command line too long" if line.bytesize + 2 > max_line
+                raise InvalidParameters, "Command line too long" if line.bytesize + 2 > max_command_line_length(session, line)
                 log(session, Logger::DEBUG, "<<< #{printable(loggable_command(session, line))}\n")
 
                 output = process_line(session, line)
@@ -1709,8 +1710,14 @@ module MailSmtp
         @starttls == :required
       end
 
-      def auth_line_length?(session, line)
-        auth_value_phase?(session.phase) || line.match?(/\AAUTH\s/i)
+      def max_command_line_length(session, line)
+        if auth_value_phase?(session.phase) || line.match?(/\AAUTH\s/i)
+          MAX_AUTH_LINE_LENGTH
+        elsif @auth != :disabled && line.match?(/\AMAIL FROM:/i)
+          MAX_MAIL_LINE_LENGTH_WITH_AUTH
+        else
+          MAX_COMMAND_LINE_LENGTH
+        end
       end
 
       # After the SMTP error reply, drop the session when AUTH or general error
