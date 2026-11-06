@@ -143,7 +143,9 @@ module MailSmtp
       rescue ServiceUnavailable
         raise
       rescue Error => e
-        @failure ||= e
+        # A bare LF behind a recoverable failure, such as one the headers hook raised,
+        # must still stop the drain.
+        @failure = e if @failure.nil? || (e.unrecoverable? && !@failure.unrecoverable?)
       end
   end
 

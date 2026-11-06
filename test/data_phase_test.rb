@@ -283,6 +283,20 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_equal [ "a@example.com" ], server.mail_from_calls
   end
 
+  # The hook's refusal is recorded first and is recoverable, so the bare LF behind it
+  # must still stop the drain: missing it would end DATA at the <LF>.<CRLF>.
+  def test_a_bare_lf_behind_a_headers_hook_refusal_closes_the_connection
+    server = HeadersRefusingServer.new(**server_options(pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: x\r\n\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A550 /, read_smtp_response(socket).to_s)
+    assert_nil gets_or_nil(socket)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+  end
+
   def test_a_receive_that_wraps_a_bare_lf_in_its_own_error_still_closes_the_connection
     server = WrappingServer.new(**server_options(pipelining: true))
     start(server)
@@ -484,6 +498,13 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
       io.read
     rescue StandardError
       raise "storage failed"
+    end
+  end
+
+  # Refuses every message once its headers are in.
+  class HeadersRefusingServer < ReceivingServer
+    def headers_received(_session)
+      raise MailSmtp::ServerIntegrationTest::RelayDenied
     end
   end
 
