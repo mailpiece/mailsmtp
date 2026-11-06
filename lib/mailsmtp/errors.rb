@@ -49,7 +49,7 @@ module MailSmtp
     status 500, "Syntax error, command unrecognized", enhanced: "5.5.1"
   end
 
-  # 500 — a DATA body line exceeded the RFC 5321 text-line limit
+  # Deprecated: raised nowhere, since a DATA line may be any length.
   class LineTooLong < Error
     status 500, "Line too long", enhanced: "5.5.2"
   end

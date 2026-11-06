@@ -64,6 +64,7 @@ module MailSmtp
     LOGGER_SEVERITY = Logger::INFO
     # RFC 5321 §4.5.3.1.4 (octets, including the CRLF).
     MAX_COMMAND_LINE_LENGTH = 512
+    # Deprecated: no DATA line length is enforced.
     MAX_TEXT_LINE_LENGTH = Limits::MAX_TEXT_LINE_LENGTH
     # RFC 4954 §4: AUTH base64 responses (commands and continuations) may be
     # up to 12288 octets — not the 512-octet SMTP command-line ceiling.
@@ -365,7 +366,7 @@ module MailSmtp
     end
 
     # +io+ is a +DataReader+ of dot-unstuffed message bytes (contract in the README).
-    # A SIZE or line-length failure raises from +read+ — a short body is not success.
+    # A failure such as SIZE raises from +read+ — a short body is not success.
     def receive(session, io)
     end
 
@@ -1425,13 +1426,13 @@ module MailSmtp
         idle_since = [ monotonic_time ]
         data_started = idle_since[0]
         bytes_received = [ 0 ]
+        # How the bytes before the next piece ended: :crlf, :lf, or nil mid-line.
         # The DATA command's own CRLF precedes the first line.
-        after_crlf = [ true ]
+        previous_end = [ :crlf ]
         reader = DataReader.new(
           max_message_size: max_message_size,
-          max_line_length: MAX_TEXT_LINE_LENGTH,
           on_headers: -> { headers_received(session) }
-        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf) }
+        ) { read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, previous_end) }
 
         reader = PrefixedReader.new(received_header(session), reader) if @add_received
 
@@ -1479,13 +1480,23 @@ module MailSmtp
       end
 
       # Next DATA line as dot-unstuffed bytes plus CRLF, or +nil+ at the terminator, which
-      # is only <CRLF>.<CRLF>: a dot after a bare LF is body.
-      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, after_crlf)
+      # is only <CRLF>.<CRLF>: a dot after a bare LF is body. A long line comes in pieces.
+      def read_data_line(io, buffer, idle_since, session_deadline, data_started, bytes_received, previous_end)
         loop do
           raise_if_session_expired(session_deadline)
           raise_if_data_rate_too_low(data_started, bytes_received[0])
 
           body_line = buffer.take_body_line
+          if body_line.nil? && (fragment = buffer.take_body_fragment(READ_CHUNK_BYTES))
+            raise BareCarriageReturn if @forbid_bare_newline && fragment.include?("\r")
+
+            idle_since[0] = monotonic_time
+            fragment.slice!(0) if fragment[0] == "." && previous_end[0]
+            previous_end[0] = nil
+            bytes_received[0] += fragment.bytesize
+            return fragment
+          end
+
           unless body_line
             fill_buffer(io, buffer) do
               raise_if_session_expired(session_deadline)
@@ -1507,11 +1518,10 @@ module MailSmtp
           idle_since[0] = monotonic_time
 
           # As Postfix's smtpd_forbid_bare_newline = normalize: both ends of the dot need CRLF.
-          return nil if line == "." && crlf && after_crlf[0]
+          return nil if line == "." && crlf && previous_end[0] == :crlf
 
-          after_crlf[0] = crlf
-
-          line.slice!(0) if line[0] == "."
+          line.slice!(0) if line[0] == "." && previous_end[0]
+          previous_end[0] = crlf ? :crlf : :lf
           bytes_received[0] += line.bytesize + 2
           return "#{line}\r\n"
         end
