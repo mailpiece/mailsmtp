@@ -63,10 +63,10 @@ class MailSmtp::StressTest < MailSmtp::ServerIntegrationTest
     assert_raises(MailSmtp::ServiceUnavailable) { server.send(:raise_if_idle_timeout, idle_since) }
   end
 
-  # A body dripped just above min_data_rate must not keep the full read_timeout as
-  # its grace while the server is stressed.
+  # A body dripped just above min_data_rate must not keep the full grace while the
+  # server is stressed.
   def test_a_stressed_server_shortens_the_data_rate_grace_to_ten_seconds
-    server = start_server(max_connections: 2, stress_threshold: 0.8, read_timeout: 300)
+    server = start_server(max_connections: 2, stress_threshold: 0.8, data_rate_grace: 300)
     data_started = server.send(:monotonic_time) - 11
     server.send(:raise_if_data_rate_too_low, data_started, 0)
 
