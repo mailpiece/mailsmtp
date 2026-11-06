@@ -454,9 +454,9 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   # A line every 0.1s never lets read_timeout fire, but at the default 500 bytes/s
-  # the drip falls behind as soon as read_timeout's grace runs out.
+  # the drip falls behind as soon as the grace runs out.
   def test_a_client_dripping_the_body_below_the_minimum_data_rate_is_dropped
-    server = start_server(read_timeout: 0.3)
+    server = start_server(data_rate_grace: 0.3)
 
     socket = data_phase_socket(port)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -469,7 +469,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_a_large_body_sent_quickly_keeps_up_with_the_minimum_data_rate
-    server = ReceivingServer.new(**server_options(read_timeout: 0.3))
+    server = ReceivingServer.new(**server_options(data_rate_grace: 0.3))
     start(server)
 
     socket = data_phase_socket(port)
@@ -479,8 +479,20 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_operator server.received[:data].bytesize, :>, 200_000
   end
 
+  def test_a_longer_read_timeout_leaves_the_data_rate_grace_alone
+    server = start_server(read_timeout: 600)
+    data_started = server.send(:monotonic_time) - MailSmtp::Server::DATA_RATE_GRACE - 1
+
+    assert_raises(MailSmtp::ServiceUnavailable) { server.send(:raise_if_data_rate_too_low, data_started, 0) }
+  end
+
+  def test_the_data_rate_grace_must_be_a_number
+    error = assert_raises(ArgumentError) { MailSmtp::Server.new(**server_options(data_rate_grace: nil)) }
+    assert_match(/data_rate_grace/, error.message)
+  end
+
   def test_a_nil_min_data_rate_leaves_a_dripping_client_to_the_idle_timeout
-    start_server(read_timeout: 0.3, min_data_rate: nil)
+    start_server(read_timeout: 0.3, data_rate_grace: 0.3, min_data_rate: nil)
 
     socket = data_phase_socket(port)
 

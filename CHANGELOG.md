@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added `data_rate_grace` (default 300 seconds): how long DATA runs before `min_data_rate` applies, which used to be `read_timeout`, so raising `read_timeout` no longer widens the slow-DATA window
 - Changed: a DATA line past 1000 octets is accepted, bounded only by `max_message_size`; `LineTooLong`, `MAX_TEXT_LINE_LENGTH` and `max_line_length:` are deprecated no-ops
 - Added the `before_banner(session, io)` hook, called with the client's socket before the banner
 - Changed: a peer in `proxy_hosts` now gets no banner until it sends its PROXY header

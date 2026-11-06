@@ -31,9 +31,10 @@ module MailSmtp
     # RFC 5321 §4.5.3.2.7: servers should wait at least 5 minutes for the next
     # client command. (The earlier §4.5.3.2.1–.6 times are client-side.)
     READ_TIMEOUT = 300
-    # Postfix's smtpd_min_data_rate (bytes per second): past +read_timeout+, DATA
-    # must keep up this rate, so a line every few seconds cannot hold a slot.
+    # Bytes per second: past +data_rate_grace+, DATA must keep up this rate, so a
+    # line every few seconds cannot hold a slot.
     MIN_DATA_RATE = 500
+    DATA_RATE_GRACE = 300
     WRITE_TIMEOUT = 30
     HANDSHAKE_TIMEOUT = 30
     MAX_PROCESSINGS_WAIT = 30
@@ -164,7 +165,7 @@ module MailSmtp
       max_message_size: MAX_MESSAGE_SIZE, max_recipients: MAX_RECIPIENTS,
       max_processings_wait: MAX_PROCESSINGS_WAIT,
       read_timeout: READ_TIMEOUT, write_timeout: WRITE_TIMEOUT,
-      min_data_rate: MIN_DATA_RATE,
+      min_data_rate: MIN_DATA_RATE, data_rate_grace: DATA_RATE_GRACE,
       handshake_timeout: HANDSHAKE_TIMEOUT,
       max_session_duration: MAX_SESSION_DURATION,
       max_auth_failures: MAX_AUTH_FAILURES,
@@ -177,7 +178,7 @@ module MailSmtp
         max_processings: max_processings, max_connections_per_ip: max_connections_per_ip,
         max_processings_per_ip: max_processings_per_ip, max_recipients: max_recipients, max_auth_failures: max_auth_failures,
         max_exceptions: max_exceptions, max_junk_commands: max_junk_commands, min_data_rate: min_data_rate,
-        error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
+        data_rate_grace: data_rate_grace, error_sleep_after: error_sleep_after, error_sleep_time: error_sleep_time, stress_threshold: stress_threshold,
         max_messages_per_ip: max_messages_per_ip,
         max_tls_sessions_per_ip: max_tls_sessions_per_ip, max_auth_attempts_per_ip: max_auth_attempts_per_ip,
         eight_bit_mime: eight_bit_mime, smtputf8: smtputf8, logger: logger, logger_severity: logger_severity)
@@ -204,6 +205,7 @@ module MailSmtp
       @read_timeout = read_timeout
       @write_timeout = write_timeout
       @min_data_rate = min_data_rate
+      @data_rate_grace = data_rate_grace
       # Always finite, and independent of +read_timeout+ (which may be nil). +Timeout+
       # cannot interrupt OpenSSL's blocking accept, so +IO#timeout+ is set around it.
       @handshake_timeout = handshake_timeout || HANDSHAKE_TIMEOUT
@@ -421,7 +423,7 @@ module MailSmtp
       # wrong at once.
       def validate_options(tls:, auth:, starttls:, max_connections:, max_processings:,
         max_connections_per_ip:, max_processings_per_ip:, max_recipients:, max_auth_failures:, max_exceptions:, max_junk_commands:,
-        min_data_rate:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
+        min_data_rate:, data_rate_grace:, error_sleep_after:, error_sleep_time:, stress_threshold:, max_messages_per_ip:, max_tls_sessions_per_ip:,
         max_auth_attempts_per_ip:, eight_bit_mime:, smtputf8:, logger:, logger_severity:)
         raise ArgumentError, "Unknown auth mode #{auth.inspect}" unless AUTH_POLICIES.include?(auth)
         raise ArgumentError, "Unknown starttls mode #{starttls.inspect}" unless STARTTLS_POLICIES.include?(starttls)
@@ -449,6 +451,9 @@ module MailSmtp
         end
         unless min_data_rate.nil? || (min_data_rate.is_a?(Integer) && min_data_rate >= 1)
           raise ArgumentError, "min_data_rate must be nil or an Integer >= 1"
+        end
+        unless data_rate_grace.is_a?(Numeric) && data_rate_grace >= 0
+          raise ArgumentError, "data_rate_grace must be a Numeric >= 0"
         end
         unless error_sleep_after.nil? || (error_sleep_after.is_a?(Integer) && error_sleep_after >= 1)
           raise ArgumentError, "error_sleep_after must be nil or an Integer >= 1"
@@ -1589,11 +1594,10 @@ module MailSmtp
         end
       end
 
-      # The grace for the first bytes is the idle timeout, shortened under stress like
-      # it; without one the rate is not enforced either.
+      # The grace for the first bytes is shortened under stress like the idle timeout.
       def raise_if_data_rate_too_low(data_started, bytes_received)
-        if @min_data_rate && idle_timeout &&
-            monotonic_time > data_started + idle_timeout + bytes_received.fdiv(@min_data_rate)
+        grace = stressed? ? [ @data_rate_grace, STRESS_TIMEOUT ].min : @data_rate_grace
+        if @min_data_rate && monotonic_time > data_started + grace + bytes_received.fdiv(@min_data_rate)
           raise ServiceUnavailable, "Data rate too low"
         end
       end
