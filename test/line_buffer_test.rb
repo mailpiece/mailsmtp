@@ -69,6 +69,27 @@ class MailSmtp::LineBufferTest < MailSmtp::TestCase
     assert_nil buffer.take_body_line
   end
 
+  def test_a_long_body_line_comes_out_in_fragments_holding_back_its_last_byte
+    buffer = MailSmtp::LineBuffer.new
+    buffer << "abcdef"
+
+    assert_nil buffer.take_body_fragment(6)
+    assert_equal "abcde", buffer.take_body_fragment(4)
+    buffer << "gh\r"
+    assert_equal "fg", buffer.take_body_fragment(2)
+    buffer << "\n"
+    assert_equal [ "h", true ], buffer.take_body_line
+  end
+
+  def test_no_fragment_while_a_whole_line_is_buffered
+    buffer = MailSmtp::LineBuffer.new
+    buffer << "one\r\ntwo and more"
+
+    assert_nil buffer.take_body_fragment(1)
+    assert_equal [ "one", true ], buffer.take_body_line
+    assert_equal "two and mor", buffer.take_body_fragment(1)
+  end
+
   def test_pipelined_lines_come_back_in_order
     buffer = MailSmtp::LineBuffer.new
     buffer << "EHLO a\r\nMAIL FROM:<b@c>\r\nRCPT TO:<d@e>\r\nDATA\r\n"

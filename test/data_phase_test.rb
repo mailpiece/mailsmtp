@@ -132,8 +132,9 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     end
   end
 
-  def test_rejects_oversized_data_lines_only_after_dot
-    start_server
+  def test_accepts_a_data_line_past_1000_octets
+    server = ReceivingServer.new(**server_options)
+    start(server)
 
     socket = connect(port)
     read_smtp_response(socket)
@@ -147,12 +148,25 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_match(/\A354 /, read_smtp_response(socket).to_s)
     socket.print("X-Long: #{"x" * 1200}\r\n\r\nBody\r\n.\r\n")
 
-    assert_match(/\A500 /, read_smtp_response(socket).to_s)
-    socket.print("RSET\r\n")
     assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal "X-Long: #{"x" * 1200}\r\n\r\nBody\r\n", server.received[:data]
   end
 
-  def test_line_too_long_without_dot_hits_drain_ceiling_and_closes
+  # Handed on in pieces, a line's dots are unstuffed only where it starts, and a
+  # "." CRLF closing it is not the terminator.
+  def test_a_line_longer_than_a_read_reaches_receive_unchanged
+    server = ReceivingServer.new(**server_options)
+    start(server)
+    line = "." * 100_000
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: hi\r\n\r\n.#{line}\r\nx#{line}\r\n.\r\n")
+
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
+    assert_equal "Subject: hi\r\n\r\n#{line}\r\nx#{line}\r\n", server.received[:data]
+  end
+
+  def test_a_long_line_past_the_size_limit_without_dot_closes
     start_server(max_message_size: 80)
 
     socket = connect(port)
@@ -176,7 +190,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
       # closed during drain / reply
     end
 
-    assert response.nil? || response.to_s.start_with?("500 ")
+    assert response.nil? || response.to_s.start_with?("552 ")
     wait_until_idle(@servers.last)
     assert_equal 0, @servers.last.connections_count
   end
@@ -242,16 +256,16 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_includes server.received[:data], "Subject: FORGED"
   end
 
-  # A long line is a failure the drain resynchronizes from, and it must not let the
-  # bare LF behind it be forgotten: that would end DATA at the <LF>.<CRLF>.
+  # A long line is handed on in pieces, and the bare LF ending one must still be
+  # caught: missing it would end DATA at the <LF>.<CRLF>.
   def test_a_bare_lf_behind_a_long_line_closes_the_connection
     server = ReceivingServer.new(**server_options(pipelining: true))
     start(server)
 
     socket = data_phase_socket(port)
-    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+    socket.print("Subject: hi\r\n\r\n#{"a" * 20_000}\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
 
-    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    assert_match(/\A550 /, read_smtp_response(socket).to_s)
     assert_nil gets_or_nil(socket)
     assert_equal [ "a@example.com" ], server.mail_from_calls
   end
@@ -261,10 +275,24 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     start(server)
 
     socket = data_phase_socket(port)
-    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\nx\n.\r\n")
-    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    socket.print("Subject: hi\r\n\r\n#{"a" * 20_000}\nx\n.\r\n")
+    assert_match(/\A550 /, read_smtp_response(socket).to_s)
     socket.print("MAIL FROM:<ceo@victim.example>\r\n")
 
+    assert_nil gets_or_nil(socket)
+    assert_equal [ "a@example.com" ], server.mail_from_calls
+  end
+
+  # The hook's refusal is recorded first and is recoverable, so the bare LF behind it
+  # must still stop the drain: missing it would end DATA at the <LF>.<CRLF>.
+  def test_a_bare_lf_behind_a_headers_hook_refusal_closes_the_connection
+    server = HeadersRefusingServer.new(**server_options(pipelining: true))
+    start(server)
+
+    socket = data_phase_socket(port)
+    socket.print("Subject: x\r\n\r\nx\n.\r\n#{SMUGGLED_TRANSACTION}")
+
+    assert_match(/\A550 /, read_smtp_response(socket).to_s)
     assert_nil gets_or_nil(socket)
     assert_equal [ "a@example.com" ], server.mail_from_calls
   end
@@ -334,14 +362,13 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_nil socket.gets
   end
 
-  # The counterpart to the two above: a failure the reader *can* resynchronize from
-  # still drains to the "." and leaves the session usable.
-  def test_a_too_long_line_drains_and_the_session_continues
+  # The counterpart to the two above: a long line is no reason to drop the session.
+  def test_a_long_line_leaves_the_session_usable
     start_server
 
     socket = data_phase_socket(port)
-    socket.print("Subject: hi\r\n\r\n#{"a" * 1200}\r\n.\r\n")
-    assert_match(/\A500 /, read_smtp_response(socket).to_s)
+    socket.print("Subject: hi\r\n\r\n#{"a" * 20_000}\r\n.\r\n")
+    assert_match(/\A250 /, read_smtp_response(socket).to_s)
 
     socket.print("RSET\r\n")
 
@@ -427,9 +454,9 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   # A line every 0.1s never lets read_timeout fire, but at the default 500 bytes/s
-  # the drip falls behind as soon as read_timeout's grace runs out.
+  # the drip falls behind as soon as the grace runs out.
   def test_a_client_dripping_the_body_below_the_minimum_data_rate_is_dropped
-    server = start_server(read_timeout: 0.3)
+    server = start_server(data_rate_grace: 0.3)
 
     socket = data_phase_socket(port)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -442,7 +469,7 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
   end
 
   def test_a_large_body_sent_quickly_keeps_up_with_the_minimum_data_rate
-    server = ReceivingServer.new(**server_options(read_timeout: 0.3))
+    server = ReceivingServer.new(**server_options(data_rate_grace: 0.3))
     start(server)
 
     socket = data_phase_socket(port)
@@ -452,8 +479,20 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
     assert_operator server.received[:data].bytesize, :>, 200_000
   end
 
+  def test_a_longer_read_timeout_leaves_the_data_rate_grace_alone
+    server = start_server(read_timeout: 600)
+    data_started = server.send(:monotonic_time) - MailSmtp::Server::DATA_RATE_GRACE - 1
+
+    assert_raises(MailSmtp::ServiceUnavailable) { server.send(:raise_if_data_rate_too_low, data_started, 0) }
+  end
+
+  def test_the_data_rate_grace_must_be_a_number
+    error = assert_raises(ArgumentError) { MailSmtp::Server.new(**server_options(data_rate_grace: nil)) }
+    assert_match(/data_rate_grace/, error.message)
+  end
+
   def test_a_nil_min_data_rate_leaves_a_dripping_client_to_the_idle_timeout
-    start_server(read_timeout: 0.3, min_data_rate: nil)
+    start_server(read_timeout: 0.3, data_rate_grace: 0.3, min_data_rate: nil)
 
     socket = data_phase_socket(port)
 
@@ -471,6 +510,13 @@ class MailSmtp::DataPhaseTest < MailSmtp::ServerIntegrationTest
       io.read
     rescue StandardError
       raise "storage failed"
+    end
+  end
+
+  # Refuses every message once its headers are in.
+  class HeadersRefusingServer < ReceivingServer
+    def headers_received(_session)
+      raise MailSmtp::ServerIntegrationTest::RelayDenied
     end
   end
 
